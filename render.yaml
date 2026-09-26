@@ -1,0 +1,22 @@
+services:
+  - type: web
+    name: reading-club
+    runtime: node
+    plan: starter
+    numInstances: 1
+    buildCommand: npm ci
+    startCommand: npm start
+    healthCheckPath: /healthz
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: STRIPE_SECRET_KEY
+        sync: false
+      - key: STRIPE_PRICE_ID
+        sync: false
+      - key: SITE_URL
+        sync: false
+      - key: ENROLLMENT_CAPACITY
+        value: '60'
+      - key: ENROLLMENT_OPEN
+        value: 'false'
