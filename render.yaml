@@ -7,16 +7,35 @@ services:
     buildCommand: npm ci
     startCommand: npm start
     healthCheckPath: /healthz
+    # Keeps seat reservations across deploys while Stripe is off.
+    disk:
+      name: reading-club-data
+      mountPath: /var/data
+      sizeGB: 1
     envVars:
       - key: NODE_ENV
         value: production
-      - key: STRIPE_SECRET_KEY
-        sync: false
-      - key: STRIPE_PRICE_ID
-        sync: false
-      - key: SITE_URL
-        sync: false
-      - key: ENROLLMENT_CAPACITY
-        value: '60'
+      - key: DATA_DIR
+        value: /var/data
       - key: ENROLLMENT_OPEN
         value: 'false'
+      - key: SITE_URL
+        sync: false
+      - key: LOGIN_SECRET
+        generateValue: true
+      - key: RESEND_API_KEY
+        sync: false
+      - key: MAIL_FROM
+        sync: false
+      - key: NOTIFY_EMAIL
+        sync: false
+      - key: STRIPE_SECRET_KEY
+        sync: false
+      - key: MEMBER_PRICE_ID
+        sync: false
+      - key: DROPIN_PRICE_ID
+        sync: false
+      - key: SOURCE_PROMOS
+        sync: false
+      - key: BILLING_PORTAL_URL
+        sync: false

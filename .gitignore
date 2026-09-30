@@ -1,6 +1,5 @@
 node_modules/
 .env
-.env.*
-!.env.example
-roster*.csv
-*.log
+private.json
+data/
+*.csv

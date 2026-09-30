@@ -1,0 +1,10 @@
+{
+  "_note": "Copy to private.json and fill in. Only shown to signed-in members. Leave a value empty and the page says it is coming by email.",
+  "lecture": { "address": "", "stream": "" },
+  "sections": {
+    "a": { "zoom": "" },
+    "b": { "zoom": "" },
+    "c": { "zoom": "" }
+  },
+  "readings": ""
+}

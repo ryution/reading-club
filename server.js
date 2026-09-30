@@ -3,244 +3,338 @@
 const fs = require('fs');
 const path = require('path');
 const express = require('express');
-const Stripe = require('stripe');
-const { loadLocalEnv, validateConfig, missingDetails } = require('./config');
-const defaultDetails = require('./club-details.json');
+const { termDates, todayIn } = require('./lib/schedule');
+const { buildIcs } = require('./lib/calendar');
+const { makeToken, readToken, resendMailer } = require('./lib/login');
+const { createLocalLedger } = require('./lib/ledger-local');
+const { createStripeLedger } = require('./lib/ledger-stripe');
+const pages = require('./lib/pages');
 
-// The one product this site sells. The server refuses to open Checkout unless
-// the configured Stripe Price matches these values exactly.
-const EXPECTED_PRICE = { unit_amount: 45000, currency: 'usd', type: 'one_time' };
+const loadProgram = (file = path.join(__dirname, 'program.json')) => JSON.parse(fs.readFileSync(file, 'utf8'));
+// Zoom links and addresses. Kept out of program.json and never served as a file.
+const loadPrivate = (file = path.join(__dirname, 'private.json')) => (fs.existsSync(file) ? JSON.parse(fs.readFileSync(file, 'utf8')) : {});
 
-// Tags every Checkout Session so enrollments for this term can be counted.
-// Change this for the next term so the seat count starts over.
-const PROGRAM = 'reading-club-good-life-2026';
-const DEFAULT_CAPACITY = 60;
+const EMAIL = /^[^\s@<>"]+@[^\s@<>"]+\.[^\s@<>"]+$/;
 
-const PAGES = path.join(__dirname, 'pages');
-const read = (name) => fs.readFileSync(path.join(PAGES, name), 'utf8');
-const TEMPLATES = { index: read('index.html'), result: read('result.html') };
+// ---------- small helpers ----------
 
-const NOTICES = {
-  canceled: 'You returned from checkout. If you did not finish paying, you can try again. If you already paid, check your email for a receipt before trying again.',
-  full: 'All places are enrolled or currently held in checkout. If a place becomes available, you can try again later.',
-  unavailable: 'Online enrollment is not available right now. Please try again later.',
-  pending: 'Enrollment opens once the class details are confirmed. Please check back soon.',
-  busy: 'Another checkout is opening. Please wait a few seconds, then try again.',
-};
+function sectionById(program, id) { return program.sections.find((s) => s.id === id) || null; }
+function sectionDates(program, section) { return termDates(program.termStarts, program.weeks, section.weekdays); }
+function lectureDates(program) { return termDates(program.termStarts, program.weeks, [program.lecture.weekday]); }
 
-const escapeHtml = (value) => String(value).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
-
-function renderIndex(noticeKey, details, ready) {
-  const text = NOTICES[noticeKey];
-  const notice = text ? `<p class="notice" role="status">${text}</p>` : '';
-  const values = {
-    START_DATE: escapeHtml(details.startDate),
-    LECTURE: escapeHtml(details.lectureSchedule || 'Schedule to be announced.'),
-    GROUPS: escapeHtml(details.smallGroupSchedule || 'Schedule to be announced.'),
-    LOCATION: escapeHtml(details.location || 'Location or online format to be announced.'),
-    REFUNDS: escapeHtml(details.refundPolicy || 'Refund policy will be published before enrollment opens.'),
-    CONTACT: missingDetails(details).includes('contactEmail') ? '' : `<p>Questions? <a href="mailto:${escapeHtml(details.contactEmail)}">${escapeHtml(details.contactEmail)}</a></p>`,
-    BUTTON: ready ? 'Enroll in Reading Club' : 'Enrollment opens soon',
-    DISABLED: ready ? '' : 'disabled',
-  };
-  // A replacement callback keeps dollar signs in organizer-supplied text literal.
-  return TEMPLATES.index.replace('<!--NOTICE-->', () => notice)
-    .replace(/<!--(START_DATE|LECTURE|GROUPS|LOCATION|REFUNDS|CONTACT|BUTTON|DISABLED)-->/g, (_, key) => values[key]);
+// Where a visitor came from: ?src=journal, ?src=222, ?src=luma ...
+function cleanSource(v) {
+  const s = String(v || '').trim().toLowerCase();
+  return /^[a-z0-9_-]{1,40}$/.test(s) ? s : '';
 }
 
-function renderResult({ title, body }) {
-  return TEMPLATES.result.replace('<!--TITLE-->', title).replace('<!--BODY-->', body);
+// A promo code typed or shared as a link: /?code=SPRING
+function cleanCode(v) {
+  const s = String(v || '').trim().toUpperCase();
+  return /^[A-Z0-9_-]{2,40}$/.test(s) ? s : '';
 }
 
-const CONFIRMED = renderResult({
-  title: 'You’re in',
-  body: `
-    <h1>You’re in.</h1>
-    <p class="lead">Welcome to Reading Club: The Good Life.</p>
-    <p>We begin <!--START_DATE-->.</p>
-    <p>The club team will email you the readings and small-group joining details before the first class.</p>
-    <!--CONTACT-->
-    <p>We look forward to reading with you.</p>`,
-});
-
-// Bank payments finish checkout before the money arrives.
-const PROCESSING = renderResult({
-  title: 'Payment processing',
-  body: `
-    <h1>Your payment is processing.</h1>
-    <p class="lead">Your payment is still processing.</p>
-    <p>Your enrollment is confirmed once payment clears. Please check your receipt or contact the club team before paying again.</p>
-    <!--CONTACT-->`,
-});
-
-const NOT_CONFIRMED = renderResult({
-  title: 'Payment not confirmed',
-  body: `
-    <h1>We could not confirm your payment.</h1>
-    <p>If you tried to pay, check your email for a receipt or contact the club team before paying again.</p>
-    <!--CONTACT-->
-    <p><a href="/">Return to Reading Club</a></p>`,
-});
-
-function priceProblem(price) {
-  if (!price.active) return 'price is archived';
-  for (const [key, want] of Object.entries(EXPECTED_PRICE)) {
-    if (price[key] !== want) return `${key} is ${JSON.stringify(price[key])}, expected ${JSON.stringify(want)}`;
+function readCookies(req) {
+  const out = {};
+  for (const part of String(req.headers.cookie || '').split(';')) {
+    const i = part.indexOf('=');
+    if (i > 0) {
+      try { out[part.slice(0, i).trim()] = decodeURIComponent(part.slice(i + 1).trim()); } catch { /* ignore bad cookie */ }
+    }
   }
-  return null;
+  return out;
 }
 
-function checkoutParams(priceId, base) {
-  return {
-    mode: 'payment', // one-time charge, never a subscription
-    payment_method_types: ['card'],
-    expires_at: Math.floor(Date.now() / 1000) + 31 * 60,
-    line_items: [{ price: priceId, quantity: 1 }],
-    custom_fields: [
-      { key: 'full_name', label: { type: 'custom', custom: 'Full name' }, type: 'text' },
-    ],
-    customer_creation: 'always', // saves name/email on a Stripe Customer
-    submit_type: 'pay',
-    metadata: { program: PROGRAM },
-    payment_intent_data: {
-      description: 'Reading Club: The Good Life (six-week term)',
-      metadata: { program: PROGRAM },
-    },
-    success_url: `${base}/enrolled?session_id={CHECKOUT_SESSION_ID}`,
-    cancel_url: `${base}/?canceled=1`,
-  };
-}
-
-// Every completed checkout for this term, newest first. Stripe is the record.
-async function* listEnrollments(stripe) {
-  for await (const s of stripe.checkout.sessions.list({ status: 'complete', limit: 100 })) {
-    if (s.metadata && s.metadata.program === PROGRAM) yield s;
+// Open seats per section and per upcoming date. A new member needs a seat on every date.
+function availability(program, counts, today) {
+  const out = {};
+  for (const sec of program.sections) {
+    const upcoming = sectionDates(program, sec).filter((d) => d >= today);
+    const dates = upcoming.map((d) => ({ date: d, left: Math.max(0, sec.capacity - counts.members[sec.id] - (counts.dropins[`${sec.id}|${d}`] || 0)) }));
+    const busiest = upcoming.reduce((m, d) => Math.max(m, counts.dropins[`${sec.id}|${d}`] || 0), 0);
+    out[sec.id] = { memberLeft: upcoming.length ? Math.max(0, sec.capacity - counts.members[sec.id] - busiest) : 0, dates };
   }
+  return out;
 }
 
-// Include open checkouts: visitors already paying need to occupy a place too.
-async function countReservedSeats(stripe) {
-  let n = 0;
-  for await (const s of stripe.checkout.sessions.list({ limit: 100 })) {
-    if (s.metadata?.program === PROGRAM && (s.status === 'complete' ||
-        (s.status === 'open' && s.expires_at > Date.now() / 1000))) n++;
-  }
-  return n;
-}
+// ---------- app ----------
 
-async function countEnrollments(stripe) {
-  let n = 0;
-  for await (const _ of listEnrollments(stripe)) n++; // eslint-disable-line no-unused-vars
-  return n;
-}
-
-function createApp({ stripe, priceId, siteUrl, capacity = DEFAULT_CAPACITY, details = defaultDetails, enrollmentOpen = false, production = false, log = console }) {
-  siteUrl = validateConfig({ siteUrl, capacity, production });
+function createApp({
+  ledger, program = loadProgram(), privateInfo = {}, siteUrl, portalUrl, loginSecret, mailer, notifyEmail,
+  enrollmentOpen = true, log = console, now = () => new Date(),
+}) {
   const app = express();
   app.disable('x-powered-by');
-  app.set('trust proxy', 1); // correct https return links behind a hosting proxy
-
-  const ready = enrollmentOpen && missingDetails(details).length === 0 && Boolean(stripe && priceId);
-  const result = (html) => html.replace('<!--START_DATE-->', () => escapeHtml(details.startDate))
-    .replace('<!--CONTACT-->', () => missingDetails(details).includes('contactEmail') ? '' :
-      `<p>Questions? <a href="mailto:${escapeHtml(details.contactEmail)}">${escapeHtml(details.contactEmail)}</a></p>`);
-  // Serialize count + create within this process. Keep the deployment at one instance.
-  let checkoutBusy = false;
+  app.set('trust proxy', 1);
+  app.use(express.urlencoded({ extended: false, limit: '10kb' }));
+  const send = mailer || resendMailer({ log });
+  const baseUrl = (req) => siteUrl || `${req.protocol}://${req.get('host')}`;
+  const today = () => todayIn(program.timezone, now());
 
   app.use((req, res, next) => {
-    res.set({ 'X-Content-Type-Options': 'nosniff', 'Referrer-Policy': 'no-referrer',
-      'Content-Security-Policy': "default-src 'self'; style-src 'self'; font-src 'self'; img-src 'self' data:; form-action 'self' https://checkout.stripe.com; frame-ancestors 'none'; base-uri 'none'" });
+    res.set({
+      'X-Content-Type-Options': 'nosniff',
+      'Referrer-Policy': 'no-referrer',
+      'Content-Security-Policy': "default-src 'self'; style-src 'self'; font-src 'self'; img-src 'self' data:; script-src 'none'; form-action 'self' https://checkout.stripe.com; frame-ancestors 'none'; base-uri 'none'",
+    });
+    // ?code= and ?src= on any link are remembered for 30 days.
+    const cookies = readCookies(req);
+    const code = cleanCode(req.query.code);
+    const src = cleanSource(req.query.src);
+    const opts = { maxAge: 30 * 86400000, httpOnly: true, sameSite: 'lax', secure: req.secure };
+    if (code) res.cookie('rc_code', code, opts);
+    if (src && !cookies.rc_src) res.cookie('rc_src', src, opts); // first touch wins
+    req.promoCode = code || cleanCode(cookies.rc_code);
+    req.source = cleanSource(cookies.rc_src) || src || 'direct';
     next();
   });
 
   app.get('/healthz', (req, res) => res.json({ status: 'ok' }));
+  app.use(express.static(path.join(__dirname, 'public'), { maxAge: '7d', index: false }));
 
-  app.get('/', (req, res) => {
-    const q = req.query;
-    const key = q.canceled ? 'canceled' : q.full ? 'full' : q.error === 'busy' ? 'busy' : q.error ? 'unavailable' : !ready ? 'pending' : null;
-    res.set('Cache-Control', 'no-store').type('html').send(renderIndex(key, details, ready));
+  let cache = null;
+  async function seats() {
+    if (cache && Date.now() - cache.at < ledger.cacheMs) return cache.value;
+    const value = availability(program, await ledger.counts(), today());
+    cache = { at: Date.now(), value };
+    return value;
+  }
+  const forget = () => { cache = null; };
+
+  const ctx = (req) => ({ program, mode: ledger.mode, enrollmentOpen, code: req.promoCode });
+
+  app.get('/', async (req, res) => {
+    let avail = null;
+    try { avail = await seats(); } catch (err) { log.error('[seats]', err.message); }
+    res.set('Cache-Control', 'no-store').type('html').send(pages.landing({ ...ctx(req), avail, notice: req.query.error ? 'unavailable' : null }));
   });
 
-  app.use(express.static(path.join(__dirname, 'public'), { maxAge: '1d', index: false }));
-  app.use('/fonts', express.static(path.join(__dirname, 'node_modules/@fontsource/eb-garamond/files'), { maxAge: '30d' }));
+  app.get('/join', async (req, res) => {
+    const plan = req.query.plan === 'dropin' ? 'dropin' : 'member';
+    const q = req.query;
+    const notice = q.canceled ? 'canceled' : q.full ? 'full' : q.badcode ? 'badcode' : q.details ? 'details' : q.closed ? 'closed' : q.error ? 'unavailable' : null;
+    const extra = { plan, notice, preselect: String(q.section || ''), slot: String(q.slot || '') };
+    res.set('Cache-Control', 'no-store');
+    try {
+      res.type('html').send(pages.join({ ...ctx(req), ...extra, avail: await seats() }));
+    } catch (err) {
+      log.error('[join] Could not count seats:', err.message);
+      res.type('html').send(pages.join({ ...ctx(req), ...extra, avail: null, notice: 'unavailable' }));
+    }
+  });
 
   app.post('/checkout', async (req, res) => {
-    res.set('Cache-Control', 'no-store');
-    if (!stripe || !priceId) {
-      log.error('[checkout] Stripe is not configured: set STRIPE_SECRET_KEY and STRIPE_PRICE_ID.');
-      return res.redirect(303, '/?error=config');
-    }
-    if (!ready) return res.redirect(303, '/');
-    if (checkoutBusy) return res.redirect(303, '/?error=busy');
-    checkoutBusy = true;
-    const base = siteUrl || `${req.protocol}://${req.get('host')}`;
+    const body = req.body || {};
+    const plan = body.plan === 'dropin' ? 'dropin' : 'member';
+    // Drop-in forms send slot="section|date"; membership forms send section.
+    const [slotSection, slotDate] = String(body.slot || '').split('|');
+    const section = sectionById(program, String(body.section || slotSection || ''));
+    const date = plan === 'dropin' ? String(body.date || slotDate || '') : undefined;
+    const back = (flag) => res.redirect(303, `/join?plan=${plan}${section ? `&section=${section.id}` : ''}${date ? `&slot=${encodeURIComponent(`${section.id}|${date}`)}` : ''}&${flag}=1`);
+    if (!enrollmentOpen) return back('closed');
+    if (!section) return back('error');
+    if (plan === 'dropin' && !sectionDates(program, section).includes(date)) return back('error');
+    const name = String(body.name || '').trim().slice(0, 120);
+    const email = String(body.email || '').trim().toLowerCase().slice(0, 200);
+    if (ledger.mode === 'local' && (!name || !EMAIL.test(email))) return back('details');
+    const code = cleanCode(body.code) || req.promoCode;
+
     try {
-      const problem = priceProblem(await stripe.prices.retrieve(priceId));
-      if (problem) {
-        log.error(`[checkout] STRIPE_PRICE_ID ${priceId} is not a $450 one-time USD price (${problem}). Refusing to open Checkout.`);
-        return res.redirect(303, '/?error=price');
-      }
-      const enrolled = await countReservedSeats(stripe);
-      if (enrolled >= capacity) {
-        log.warn(`[checkout] Full: ${enrolled} of ${capacity} places taken.`);
-        return res.redirect(303, '/?full=1');
-      }
-      const session = await stripe.checkout.sessions.create(checkoutParams(priceId, base));
-      return res.redirect(303, session.url);
+      forget();
+      const avail = (await seats())[section.id];
+      const left = plan === 'member' ? avail.memberLeft : ((avail.dates.find((d) => d.date === date) || { left: 0 }).left);
+      if (left <= 0) return back('full');
+      const result = await ledger.begin({
+        plan, section, date, source: req.source, code, name, email: EMAIL.test(email) ? email : '', base: baseUrl(req),
+      });
+      forget();
+      if (result.error) return back(result.error);
+      if (result.reservation && !result.existing) await confirmReservation(req, result.reservation, section);
+      return res.redirect(303, result.redirect);
     } catch (err) {
-      log.error('[checkout] Stripe error:', err.message);
-      return res.redirect(303, '/?error=stripe');
-    } finally {
-      checkoutBusy = false;
+      log.error('[checkout]', err.message);
+      return back('error');
     }
   });
 
-  // Only show "You're in" after Stripe confirms this session.
-  app.get('/enrolled', async (req, res) => {
-    res.set('Cache-Control', 'no-store');
-    const id = String(req.query.session_id || '');
-    if (!stripe || !/^cs_[A-Za-z0-9_]+$/.test(id)) {
-      return res.status(400).type('html').send(result(NOT_CONFIRMED));
-    }
+  // Placeholder mode: tell the student their seat is held, and tell the organizers.
+  async function confirmReservation(req, r, section) {
+    const link = loginSecret ? `${baseUrl(req)}/my?t=${makeToken(r.email, loginSecret)}` : `${baseUrl(req)}/login`;
+    const what = r.plan === 'member' ? `a membership seat in ${section.name}` : `a drop-in seat on ${r.date}`;
     try {
-      const session = await stripe.checkout.sessions.retrieve(id);
-      const belongsToClub = session.metadata?.program === PROGRAM && session.mode === 'payment' &&
-        session.amount_total === EXPECTED_PRICE.unit_amount && session.currency === EXPECTED_PRICE.currency;
-      if (!belongsToClub || session.status !== 'complete') return res.status(402).type('html').send(result(NOT_CONFIRMED));
-      if (session.payment_status === 'paid') return res.type('html').send(result(CONFIRMED));
-      if (session.payment_status === 'unpaid') return res.type('html').send(result(PROCESSING));
-      return res.status(402).type('html').send(result(NOT_CONFIRMED));
+      await send({
+        to: r.email,
+        subject: `Your seat in ${program.name} is held`,
+        text: `Hi ${r.name.split(' ')[0]},\n\nYou have ${what}. We will email you a secure payment link before the term begins, and your seat stays held until then.\n\nYour schedule and joining details:\n${link}\n\n${program.org}`,
+      });
+      if (notifyEmail) {
+        await send({ to: notifyEmail, subject: `New ${r.plan === 'member' ? 'membership' : 'drop-in'}: ${r.name}`, text: `${r.name} <${r.email}>\n${what}\nSource: ${r.source}${r.code ? `\nCode: ${r.code}` : ''}` });
+      }
     } catch (err) {
-      log.error('[enrolled] Could not retrieve session:', err.message);
-      return res.status(400).type('html').send(result(NOT_CONFIRMED));
+      log.error('[mail]', err.message);
+    }
+  }
+
+  app.post('/interest', async (req, res) => {
+    const body = req.body || {};
+    const email = String(body.email || '').trim().toLowerCase().slice(0, 200);
+    const name = String(body.name || '').trim().slice(0, 120);
+    const section = sectionById(program, String(body.section || ''));
+    if (body.website) return res.type('html').send(pages.interestThanks({ program, section })); // bots fill the hidden field
+    if (!EMAIL.test(email)) return res.redirect(303, section ? `/join?section=${section.id}&details=1#waitlist` : '/?error=1#interest');
+    try {
+      await ledger.saveLead({ email, name, section: section ? section.id : '', source: req.source, lead: section ? 'waitlist' : 'interest' });
+      return res.type('html').send(pages.interestThanks({ program, section }));
+    } catch (err) {
+      log.error('[interest]', err.message);
+      return res.redirect(303, '/?error=1#interest');
     }
   });
 
-  app.use((req, res) => res.status(404).type('html').send(renderResult({
-    title: 'Page not found',
-    body: '<h1>Page not found.</h1><p><a href="/">Return to Reading Club</a></p>',
-  })));
+  function eventsFor(md) {
+    const section = sectionById(program, md.section);
+    if (!section) return [];
+    const title = `${program.shortName}: ${section.name}`;
+    if (md.plan === 'dropin') {
+      return [{ uid: `${md.section}-${md.date}@nyphilosophy-reading-club`, date: md.date, time: section.time, minutes: section.minutes, title, where: section.where }];
+    }
+    const t = today();
+    const small = sectionDates(program, section).filter((d) => d >= t)
+      .map((d) => ({ uid: `${section.id}-${d}@nyphilosophy-reading-club`, date: d, time: section.time, minutes: section.minutes, title, where: section.where }));
+    const lec = program.lecture;
+    const lectures = lectureDates(program).filter((d) => d >= t)
+      .map((d) => ({ uid: `lecture-${d}@nyphilosophy-reading-club`, date: d, time: lec.time, minutes: lec.minutes, title: `${program.shortName}: ${lec.label}`, where: lec.where }));
+    return [...lectures, ...small].sort((a, b) => (a.date + a.time).localeCompare(b.date + b.time));
+  }
+
+  async function receiptFor(req) {
+    const id = String(req.query.id || req.query.session_id || '');
+    if (!id || id.length > 200) return null;
+    return ledger.receipt(id);
+  }
+
+  app.get('/welcome', async (req, res) => {
+    res.set('Cache-Control', 'no-store');
+    try {
+      const r = await receiptFor(req);
+      const section = r && sectionById(program, r.md.section);
+      if (!r || !section) return res.status(404).type('html').send(pages.notConfirmed({ program }));
+      const memberLink = loginSecret && r.email ? `/my?t=${makeToken(r.email, loginSecret)}` : null;
+      return res.type('html').send(pages.welcome({
+        program, r, section, events: eventsFor(r.md), calendarHref: `/calendar.ics?id=${encodeURIComponent(String(req.query.id || req.query.session_id))}`, memberLink,
+      }));
+    } catch (err) {
+      log.error('[welcome]', err.message);
+      return res.status(404).type('html').send(pages.notConfirmed({ program }));
+    }
+  });
+
+  const sendIcs = (res, events) => {
+    const unique = [...new Map(events.map((e) => [e.uid, e])).values()];
+    res.set({ 'Content-Disposition': 'attachment; filename="reading-club.ics"', 'Cache-Control': 'no-store' });
+    return res.type('text/calendar').send(buildIcs({ timeZone: program.timezone, calendarName: program.name, events: unique }));
+  };
+
+  app.get('/calendar.ics', async (req, res) => {
+    try {
+      const r = await receiptFor(req);
+      if (!r) return res.status(404).send('Not found');
+      return sendIcs(res, eventsFor(r.md));
+    } catch (err) {
+      log.error('[calendar]', err.message);
+      return res.status(404).send('Not found');
+    }
+  });
+
+  // ---------- member sign-in: email in, link out, no passwords ----------
+
+  app.get('/login', (req, res) => {
+    res.type('html').send(pages.login({ program, sent: false, expired: Boolean(req.query.expired), invalid: Boolean(req.query.invalid), available: Boolean(loginSecret) }));
+  });
+
+  app.post('/login', async (req, res) => {
+    const email = String((req.body || {}).email || '').trim().toLowerCase().slice(0, 200);
+    if (!loginSecret) return res.redirect(303, '/login');
+    if (!EMAIL.test(email)) return res.redirect(303, '/login?invalid=1');
+    try {
+      const found = await ledger.enrollmentsFor(email);
+      if (found.length) {
+        const link = `${baseUrl(req)}/my?t=${makeToken(email, loginSecret)}`;
+        await send({
+          to: email,
+          subject: `Your ${program.shortName} link`,
+          text: `Here is your link to ${program.name}. It shows your section, your schedule, and how to join each session.\n\n${link}\n\nThe link works for 60 days. You can always get a new one at ${baseUrl(req)}/login.\n\n${program.org}`,
+        });
+      }
+    } catch (err) {
+      log.error('[login]', err.message);
+    }
+    // Same answer either way, so the form can't be used to check who signed up.
+    return res.type('html').send(pages.login({ program, sent: true, available: true }));
+  });
+
+  app.get('/my', async (req, res) => {
+    res.set('Cache-Control', 'no-store');
+    const email = readToken(req.query.t, loginSecret, now().getTime());
+    if (!email) return res.redirect(303, '/login?expired=1');
+    try {
+      const t = today();
+      const found = (await ledger.enrollmentsFor(email)).filter((e) => e.plan === 'member' || e.date >= t);
+      const items = found.map((e) => ({ ...e, sectionInfo: sectionById(program, e.section), events: eventsFor(e) })).filter((e) => e.sectionInfo);
+      return res.type('html').send(pages.member({ program, mode: ledger.mode, email, items, privateInfo, portalUrl, token: String(req.query.t) }));
+    } catch (err) {
+      log.error('[my]', err.message);
+      return res.status(500).type('html').send(pages.problem({ program }));
+    }
+  });
+
+  app.get('/my/calendar.ics', async (req, res) => {
+    const email = readToken(req.query.t, loginSecret, now().getTime());
+    if (!email) return res.status(404).send('Not found');
+    try {
+      return sendIcs(res, (await ledger.enrollmentsFor(email)).flatMap(eventsFor));
+    } catch (err) {
+      log.error('[my calendar]', err.message);
+      return res.status(404).send('Not found');
+    }
+  });
+
+  app.use((req, res) => res.status(404).type('html').send(pages.notFound({ program })));
 
   return app;
 }
 
 if (require.main === module) {
+  const { loadLocalEnv, validateConfig, parseSourcePromos } = require('./config');
   loadLocalEnv();
-  const { STRIPE_SECRET_KEY, STRIPE_PRICE_ID, SITE_URL, PORT = 3000, NODE_ENV, ENROLLMENT_CAPACITY } = process.env;
-  const missing = ['STRIPE_SECRET_KEY', 'STRIPE_PRICE_ID'].filter((k) => !process.env[k]);
-  if (missing.length) {
-    console.warn(`[config] Missing ${missing.join(', ')}. The page will load with enrollment closed.`);
+  const env = process.env;
+  const production = env.NODE_ENV === 'production';
+  const siteUrl = validateConfig({ siteUrl: env.SITE_URL, production });
+  const program = loadProgram();
+  let ledger;
+  if (env.STRIPE_SECRET_KEY && env.MEMBER_PRICE_ID && env.DROPIN_PRICE_ID) {
+    const Stripe = require('stripe');
+    ledger = createStripeLedger({
+      stripe: new Stripe(env.STRIPE_SECRET_KEY), program,
+      prices: { member: env.MEMBER_PRICE_ID, dropin: env.DROPIN_PRICE_ID },
+      sourcePromos: parseSourcePromos(env.SOURCE_PROMOS),
+    });
+    console.log('[payments] Stripe checkout is on.');
+  } else {
+    ledger = createLocalLedger({ program, dataDir: env.DATA_DIR || path.join(__dirname, 'data') });
+    console.log('[payments] Stripe keys not set. Signups reserve a seat and are saved to', env.DATA_DIR || 'data/');
   }
-  if (STRIPE_SECRET_KEY && /^(sk|rk)_live_/.test(STRIPE_SECRET_KEY) && NODE_ENV !== 'production') {
-    console.warn('[config] A LIVE Stripe key is set outside production. Use an sk_test_ key for development.');
-  }
-  const missingContent = missingDetails(defaultDetails);
-  if (missingContent.length) console.warn(`[config] Enrollment closed until club-details.json is complete: ${missingContent.join(', ')}.`);
-  const capacity = ENROLLMENT_CAPACITY ? Number(ENROLLMENT_CAPACITY) : DEFAULT_CAPACITY;
-  const stripe = STRIPE_SECRET_KEY ? new Stripe(STRIPE_SECRET_KEY) : null;
-  createApp({ stripe, priceId: STRIPE_PRICE_ID, siteUrl: SITE_URL, capacity,
-    enrollmentOpen: process.env.ENROLLMENT_OPEN === 'true', production: NODE_ENV === 'production' })
-    .listen(PORT, () => console.log(`Reading Club running on http://localhost:${PORT} (capacity ${capacity})`));
+  if (!env.LOGIN_SECRET) console.warn('[config] LOGIN_SECRET is not set. Member sign-in is off.');
+  const PORT = env.PORT || 3000;
+  createApp({
+    ledger, program, siteUrl,
+    privateInfo: loadPrivate(),
+    portalUrl: env.BILLING_PORTAL_URL,
+    loginSecret: env.LOGIN_SECRET,
+    notifyEmail: env.NOTIFY_EMAIL,
+    enrollmentOpen: env.ENROLLMENT_OPEN !== 'false',
+    mailer: resendMailer({ apiKey: env.RESEND_API_KEY, from: env.MAIL_FROM || 'Reading Club <onboarding@resend.dev>' }),
+  }).listen(PORT, () => console.log(`Reading Club on http://localhost:${PORT}`));
 }
 
-module.exports = { createApp, checkoutParams, priceProblem, listEnrollments, countEnrollments, countReservedSeats, EXPECTED_PRICE, PROGRAM };
+module.exports = { createApp, availability, cleanSource, cleanCode, loadProgram, loadPrivate, sectionDates, lectureDates };

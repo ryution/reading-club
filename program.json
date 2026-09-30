@@ -1,0 +1,42 @@
+{
+  "program": "nypc-reading-club",
+  "name": "Reading Club: The Good Life",
+  "shortName": "Reading Club",
+  "org": "The New York Philosophy Club",
+  "orgUrl": "https://nyphilosophy.org/",
+  "instagram": "https://www.instagram.com/joinphilosophy/",
+  "contactEmail": "",
+  "refundPolicy": "",
+  "termStarts": "2026-10-15",
+  "weeks": 6,
+  "timezone": "America/New_York",
+  "hoursPerWeek": 3,
+  "memberPrice": 450,
+  "dropInPrice": 40,
+  "texts": [
+    { "name": "Aristotle", "tradition": "Greek philosophy" },
+    { "name": "Confucius", "tradition": "Chinese philosophy" },
+    { "name": "Laozi", "tradition": "Daoism" },
+    { "name": "Proverbs", "tradition": "Hebrew wisdom" },
+    { "name": "Bhagavad Gita", "tradition": "Hindu philosophy" },
+    { "name": "Dhammapada", "tradition": "Buddhism" }
+  ],
+  "lecture": {
+    "label": "Weekly lecture",
+    "weekday": 4,
+    "time": "19:00",
+    "minutes": 60,
+    "where": "In person in New York, filmed and shared with every member"
+  },
+  "sections": [
+    { "id": "a", "name": "Section A", "weekdays": [1, 3], "time": "19:00", "minutes": 60, "where": "Zoom", "capacity": 20, "facilitator": "" },
+    { "id": "b", "name": "Section B", "weekdays": [2, 5], "time": "12:30", "minutes": 60, "where": "Zoom", "capacity": 20, "facilitator": "" },
+    { "id": "c", "name": "Section C", "weekdays": [0, 3], "time": "10:00", "minutes": 60, "where": "Zoom", "capacity": 20, "facilitator": "" }
+  ],
+  "teacher": {
+    "name": "Cole",
+    "role": "Lecturer",
+    "bio": "Cole studied classics at Harvard and ancient philosophy at Oxford, where he went on to teach philosophy in the original Greek. His focus is Plato and Aristotle. He gives the weekly lecture, and trained facilitators lead the small-group sessions.",
+    "photo": ""
+  }
+}

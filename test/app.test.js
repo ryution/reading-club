@@ -1,385 +1,309 @@
 'use strict';
 
-const { test, describe, before, after } = require('node:test');
+const { test, describe } = require('node:test');
 const assert = require('node:assert');
-const Stripe = require('stripe');
-const { createApp, checkoutParams, listEnrollments, countReservedSeats, PROGRAM } = require('../server');
-const { validateConfig } = require('../config');
-const { csv } = require('../scripts/roster');
-const enrollment = (extra = {}) => ({ mode: 'payment', amount_total: 45000, currency: 'usd', status: 'complete', payment_status: 'paid', metadata: { program: PROGRAM }, ...extra });
-const details = { startDate: 'October 15', lectureSchedule: 'Thursday 6pm ET', smallGroupSchedule: 'Monday and Wednesday 6pm ET', location: 'Online', contactEmail: 'club@example.com', refundPolicy: 'Test refund policy' };
+const fs = require('fs');
+const os = require('os');
+const path = require('path');
+const { createApp, availability, cleanSource, cleanCode, loadProgram, sectionDates } = require('../server');
+const { parseSourcePromos, validateConfig } = require('../config');
+const { createLocalLedger } = require('../lib/ledger-local');
+const { createStripeLedger, checkoutParams, priceProblem, expectedPrices } = require('../lib/ledger-stripe');
+const { termDates, formatDays } = require('../lib/schedule');
+const { buildIcs } = require('../lib/calendar');
+const { makeToken, readToken } = require('../lib/login');
+const { fakeStripe } = require('./fake-stripe');
 
-const PRICE_ID = 'price_test_450';
-const GOOD_PRICE = { id: PRICE_ID, active: true, unit_amount: 45000, currency: 'usd', type: 'one_time' };
+const program = loadProgram();
 const quietLog = { error() {}, warn() {}, log() {} };
+const BEFORE_TERM = () => new Date('2026-10-01T15:00:00Z');
+const SECRET = 'test-secret';
+const tmp = () => fs.mkdtempSync(path.join(os.tmpdir(), 'rc-test-'));
 
-function fakeStripe({ price = GOOD_PRICE, session, createError, retrieveError, completed = [] } = {}) {
-  const calls = { create: [], retrieve: [], list: [] };
-  return {
-    calls,
-    prices: { retrieve: async () => price },
-    checkout: {
-      sessions: {
-        list: (params) => {
-          calls.list.push(params);
-          return (async function* () { yield* completed; })();
-        },
-        create: async (params) => {
-          calls.create.push(params);
-          if (createError) throw createError;
-          return { id: 'cs_test_abc', url: 'https://checkout.stripe.com/c/pay/cs_test_abc' };
-        },
-        retrieve: async (id) => {
-          calls.retrieve.push(id);
-          if (retrieveError) throw retrieveError;
-          return session;
-        },
-      },
-    },
-  };
+function seeded(rows = [], leads = []) {
+  const dir = tmp();
+  fs.writeFileSync(path.join(dir, 'reservations.json'), JSON.stringify({ reservations: rows.map((r, i) => ({ id: `r_${i}`, program: program.program, status: 'reserved', name: 'X', email: `x${i}@e.co`, source: 'direct', ...r })), leads }));
+  return createLocalLedger({ program, dataDir: dir });
 }
+const members = (section, n) => Array.from({ length: n }, () => ({ plan: 'member', section }));
 
-async function serve(opts) {
-  const server = createApp({ priceId: PRICE_ID, details, enrollmentOpen: true, log: quietLog, ...opts }).listen(0);
+async function serve(opts = {}) {
+  const sent = [];
+  const server = createApp({ program, log: quietLog, now: BEFORE_TERM, loginSecret: SECRET, mailer: async (m) => { sent.push(m); }, ledger: seeded(), ...opts }).listen(0);
   await new Promise((r) => server.once('listening', r));
   const base = `http://127.0.0.1:${server.address().port}`;
   const get = (p, init) => fetch(base + p, { redirect: 'manual', ...init });
-  return { server, base, get, post: (p) => get(p, { method: 'POST' }) };
+  const post = (p, form, headers = {}) => get(p, { method: 'POST', body: new URLSearchParams(form), headers: { 'content-type': 'application/x-www-form-urlencoded', ...headers } });
+  const html = async (p, init) => (await get(p, init)).text();
+  return { get, post, html, sent, close: () => server.close() };
 }
 
-describe('landing page', () => {
-  let s;
-  before(async () => { s = await serve({ stripe: fakeStripe() }); });
-  after(() => s.server.close());
-
-  test('contains the supplied copy, pricing, and one action', async () => {
-    const res = await s.get('/');
-    assert.strictEqual(res.status, 200);
-    const html = await res.text();
-    for (const text of [
-      'Reading Club: The&nbsp;Good&nbsp;Life',
-      'Six weeks. Six traditions. One question: How should we live?',
-      'That is what Reading Club is for.',
-      'Aristotle', 'Confucius', 'Laozi', 'Proverbs', 'Bhagavad Gita', 'Dhammapada',
-      'It is a reading community built around serious study, conversation, and reflection.',
-      'October 15', '6 weeks', '60 people',
-      'Tuition: $25 per class hour.',
-      'Tuition covers the weekly lecture and two small-group reading sessions.',
-      '$450 for the complete <span class="nowrap">six-week term.</span>',
-      'Read the Great Books. Find people to think with. Build a philosophy of your own.',
-    ]) assert.ok(html.includes(text), `missing: ${text}`);
-    const actions = [...html.matchAll(/<form method="post" action="([^"]+)"/g)].map((m) => m[1]);
-    assert.deepStrictEqual([...new Set(actions)], ['/checkout'], 'every CTA goes to /checkout');
-    assert.strictEqual((html.match(/>Enroll in Reading Club</g) || []).length, 2);
-    assert.ok(!html.includes('sk_'), 'no secret key in page');
+describe('schedule and helpers', () => {
+  test('term dates land on the right weekdays for six weeks', () => {
+    assert.deepStrictEqual(termDates('2026-10-15', 6, [4]), ['2026-10-15', '2026-10-22', '2026-10-29', '2026-11-05', '2026-11-12', '2026-11-19']);
+    assert.strictEqual(sectionDates(program, program.sections[0]).length, 12);
+    assert.strictEqual(formatDays([1, 3]), 'Mondays and Wednesdays');
   });
 
-  test('stylesheet and fonts load (no broken links)', async () => {
-    const html = await (await s.get('/')).text();
-    const css = await (await s.get('/styles.css')).text();
-    const refs = [...html.matchAll(/(?:href|src)="(\/[^"]*)"/g), ...css.matchAll(/url\((\/[^)]+)\)/g)].map((m) => m[1]);
-    assert.ok(refs.length >= 4);
-    for (const ref of new Set(refs)) {
-      assert.strictEqual((await s.get(ref)).status, 200, `broken: ${ref}`);
-    }
+  test('membership price is $25 per class hour', () => {
+    assert.strictEqual(program.memberPrice, 25 * program.hoursPerWeek * program.weeks);
   });
 
-  test('cancel return avoids claiming payment status without checking Stripe', async () => {
-    const html = await (await s.get('/?canceled=1')).text();
-    assert.ok(html.includes('You returned from checkout.'));
-    assert.ok(html.includes('check your email for a receipt before trying again'));
+  test('ics has correct New York times and folded lines', () => {
+    const ics = buildIcs({ timeZone: 'America/New_York', calendarName: 'RC', events: [{ uid: 'x@y', date: '2026-10-19', time: '19:00', minutes: 60, title: 'A, b; c', where: 'Zoom' }] });
+    assert.ok(ics.includes('DTSTART;TZID=America/New_York:20261019T190000'));
+    assert.ok(ics.includes('DTEND;TZID=America/New_York:20261019T200000'));
+    assert.ok(ics.includes('SUMMARY:A\\, b\\; c'));
+    assert.ok(ics.split('\r\n').every((l) => l.length <= 75));
   });
 
-  test('unknown pages 404 with a way back', async () => {
-    const res = await s.get('/nope');
-    assert.strictEqual(res.status, 404);
-    assert.ok((await res.text()).includes('href="/"'));
+  test('inputs are cleaned', () => {
+    assert.strictEqual(cleanSource('Journal'), 'journal');
+    assert.strictEqual(cleanSource('<x>'), '');
+    assert.strictEqual(cleanCode(' spring '), 'SPRING');
+    assert.strictEqual(cleanCode('a b'), '');
+    assert.deepStrictEqual(parseSourcePromos('journal=promo_1, 222=promo_2,bad=coupon_x'), { journal: 'promo_1', 222: 'promo_2' });
+  });
+
+  test('SITE_URL must be a bare https origin in production', () => {
+    assert.strictEqual(validateConfig({ siteUrl: 'https://club.org', production: true }), 'https://club.org');
+    assert.throws(() => validateConfig({ siteUrl: 'http://club.org', production: true }));
+    assert.throws(() => validateConfig({ siteUrl: 'https://club.org/x', production: true }));
+    assert.throws(() => validateConfig({ production: true }));
+  });
+
+  test('availability: members take every date, drop-ins take one', () => {
+    const av = availability(program, { members: { a: 18, b: 20, c: 0 }, dropins: { 'a|2026-10-19': 2, 'a|2026-10-21': 1 } }, '2026-10-01');
+    assert.strictEqual(av.a.dates.find((d) => d.date === '2026-10-19').left, 0);
+    assert.strictEqual(av.a.dates.find((d) => d.date === '2026-10-21').left, 1);
+    assert.strictEqual(av.a.memberLeft, 0);
+    assert.strictEqual(av.c.memberLeft, 20);
+    const later = availability(program, { members: { a: 0, b: 0, c: 0 }, dropins: {} }, '2026-11-01');
+    assert.ok(later.a.dates.every((d) => d.date >= '2026-11-01'));
   });
 });
 
-describe('checkout', () => {
-  test('creates a one-time $450 session and redirects to Stripe', async () => {
-    const stripe = fakeStripe();
-    const s = await serve({ stripe, siteUrl: 'https://club.example' });
-    const res = await s.post('/checkout');
-    s.server.close();
+describe('pages', () => {
+  test('landing has the offer, teacher, sections with enroll buttons, tuition, and questions', async () => {
+    const s = await serve();
+    const h = await s.html('/');
+    for (const t of ['Reading Club: The&nbsp;Good&nbsp;Life', 'Six weeks. Six traditions. One question: How should we live?', 'Aristotle', 'Dhammapada',
+      'How should we&nbsp;live?', 'Who teaches', 'Plato and Aristotle', 'Sections this term', '$25<span> per class hour</span>', '$40<span> per session</span>',
+      'Questions', 'Registered 501(c)(3) public charity']) assert.ok(h.includes(t), `missing ${t}`);
+    for (const id of ['a', 'b', 'c']) assert.ok(h.includes(`/join?plan=member&amp;section=${id}`));
+    assert.ok(!h.includes('—'), 'no em dashes');
+    assert.ok(!/<script/i.test(h), 'no scripts');
+    assert.strictEqual((h.match(/<h1/g) || []).length, 1, 'one h1');
+    s.close();
+  });
+
+  test('every page links only to assets that exist, and sends security headers', async () => {
+    const s = await serve();
+    for (const p of ['/', '/join', '/join?plan=dropin', '/login', '/nope']) {
+      const res = await s.get(p);
+      assert.match(res.headers.get('content-security-policy'), /frame-ancestors 'none'/);
+      const h = await res.text();
+      const refs = [...h.matchAll(/(?:href|src|srcset)="(\/[^"#?]*\.(?:css|woff2|png|jpg|webp))"/g)].map((m) => m[1]);
+      for (const ref of new Set(refs)) assert.strictEqual((await s.get(ref)).status, 200, `broken ${ref} on ${p}`);
+    }
+    const css = await s.html('/styles.css');
+    for (const [, ref] of css.matchAll(/url\((\/[^)]+)\)/g)) assert.strictEqual((await s.get(ref)).status, 200, `broken ${ref}`);
+    assert.strictEqual((await s.get('/healthz')).status, 200);
+    assert.strictEqual((await s.get('/nope')).status, 404);
+    s.close();
+  });
+
+  test('join marks full sections, preselects the chosen one, and offers a waitlist', async () => {
+    const s = await serve({ ledger: seeded(members('a', 20)) });
+    const h = await s.html('/join?section=c');
+    assert.match(h, /value="a" disabled/);
+    assert.match(h, /value="c" checked/);
+    assert.ok(h.includes('Section A is full'));
+    assert.ok(h.includes('Reserve my seat'));
+    assert.ok(h.includes('No payment today'));
+    s.close();
+  });
+
+  test('drop-in page hides full dates and keeps the page short', async () => {
+    const s = await serve({ ledger: seeded(Array.from({ length: 20 }, () => ({ plan: 'dropin', section: 'a', date: '2026-10-19' }))) });
+    const h = await s.html('/join?plan=dropin');
+    assert.ok(!h.includes('value="a|2026-10-19"'));
+    assert.ok(h.includes('value="a|2026-10-21"'));
+    assert.ok((h.match(/name="slot"/g) || []).length <= 12);
+    s.close();
+  });
+
+  test('closed enrollment shows notify forms instead of signup', async () => {
+    const s = await serve({ enrollmentOpen: false });
+    const h = await s.html('/join');
+    assert.ok(h.includes('Signups open soon'));
+    assert.ok(!h.includes('action="/checkout"'));
+    const res = await s.post('/checkout', { plan: 'member', section: 'a', name: 'A', email: 'a@b.co' });
+    assert.match(res.headers.get('location'), /closed=1/);
+    s.close();
+  });
+});
+
+describe('reserve a seat (no Stripe yet)', () => {
+  test('a membership reservation holds a seat, emails the student, and shows the schedule', async () => {
+    const ledger = seeded();
+    const s = await serve({ ledger, notifyEmail: 'team@club.org' });
+    const res = await s.post('/checkout', { plan: 'member', section: 'b', name: 'Ada Lovelace', email: 'Ada@Example.com', code: 'journal' }, { cookie: 'rc_src=222' });
     assert.strictEqual(res.status, 303);
-    assert.strictEqual(res.headers.get('location'), 'https://checkout.stripe.com/c/pay/cs_test_abc');
-    const p = stripe.calls.create[0];
-    assert.strictEqual(p.mode, 'payment');
-    assert.deepStrictEqual(p.line_items, [{ price: PRICE_ID, quantity: 1 }]);
-    assert.strictEqual(p.custom_fields[0].key, 'full_name');
-    assert.strictEqual(p.success_url, 'https://club.example/enrolled?session_id={CHECKOUT_SESSION_ID}');
-    assert.strictEqual(p.cancel_url, 'https://club.example/?canceled=1');
+    const loc = res.headers.get('location');
+    assert.match(loc, /^\/welcome\?id=r_/);
+    await ledger.flush();
+    const r = ledger.all().reservations[0];
+    assert.deepStrictEqual([r.plan, r.section, r.email, r.source, r.code], ['member', 'b', 'ada@example.com', '222', 'JOURNAL']);
+    const h = await s.html(loc);
+    assert.ok(h.includes('Your seat is held.'));
+    assert.ok(h.includes('Ada, you have a membership seat in <strong>Section B</strong>'));
+    assert.ok(h.includes('Open my member page'));
+    const ics = await (await s.get(`/calendar.ics?${loc.split('?')[1]}`)).text();
+    assert.strictEqual((ics.match(/BEGIN:VEVENT/g) || []).length, 18, '12 sessions + 6 lectures');
+    assert.deepStrictEqual(s.sent.map((m) => m.to), ['ada@example.com', 'team@club.org']);
+    s.close();
   });
 
-  test('missing environment variables: page loads, checkout shows unavailable', async () => {
-    const s = await serve({ stripe: null, priceId: undefined });
-    assert.strictEqual((await s.get('/')).status, 200);
-    const res = await s.post('/checkout');
-    assert.strictEqual(res.status, 303);
-    assert.strictEqual(res.headers.get('location'), '/?error=config');
-    const html = await (await s.get('/?error=config')).text();
-    s.server.close();
-    assert.ok(html.includes('Online enrollment is not available right now.'));
+  test('reservations count toward capacity', async () => {
+    const s = await serve({ ledger: seeded(members('a', 19)) });
+    let res = await s.post('/checkout', { plan: 'member', section: 'a', name: 'A', email: 'a@b.co' });
+    assert.match(res.headers.get('location'), /welcome/);
+    res = await s.post('/checkout', { plan: 'member', section: 'a', name: 'B', email: 'b@b.co' });
+    assert.match(res.headers.get('location'), /full=1/);
+    s.close();
   });
 
-  for (const [label, price] of [
-    ['recurring price', { ...GOOD_PRICE, type: 'recurring' }],
-    ['wrong amount', { ...GOOD_PRICE, unit_amount: 2500 }],
-    ['archived price', { ...GOOD_PRICE, active: false }],
-  ]) {
-    test(`refuses to open Checkout for a misconfigured price (${label})`, async () => {
-      const stripe = fakeStripe({ price });
-      const s = await serve({ stripe });
-      const res = await s.post('/checkout');
-      s.server.close();
-      assert.strictEqual(res.headers.get('location'), '/?error=price');
-      assert.strictEqual(stripe.calls.create.length, 0);
-    });
-  }
-
-  test('tags the session so this term\'s enrollments can be counted', async () => {
-    const stripe = fakeStripe();
-    const s = await serve({ stripe });
-    await s.post('/checkout');
-    s.server.close();
-    const p = stripe.calls.create[0];
-    assert.strictEqual(p.metadata.program, PROGRAM);
-    assert.strictEqual(p.payment_intent_data.metadata.program, PROGRAM);
-    assert.strictEqual(stripe.calls.list[0].status, undefined, 'counts open checkouts as well as completed ones');
+  test('signing up twice returns the same seat', async () => {
+    const ledger = seeded();
+    const s = await serve({ ledger });
+    const a = await s.post('/checkout', { plan: 'member', section: 'a', name: 'A', email: 'a@b.co' });
+    const b = await s.post('/checkout', { plan: 'member', section: 'a', name: 'A', email: 'a@b.co' });
+    assert.strictEqual(a.headers.get('location'), b.headers.get('location'));
+    assert.strictEqual(ledger.all().reservations.length, 1);
+    s.close();
   });
 
-  test('capacity: seat 60 can still be sold', async () => {
-    const stripe = fakeStripe({ completed: Array.from({ length: 59 }, () => enrollment()) });
-    const s = await serve({ stripe });
-    const res = await s.post('/checkout');
-    s.server.close();
-    assert.strictEqual(res.headers.get('location'), 'https://checkout.stripe.com/c/pay/cs_test_abc');
+  test('missing details, bad section and bad date go back with a note', async () => {
+    const s = await serve();
+    for (const [form, flag] of [
+      [{ plan: 'member', section: 'a', name: '', email: 'a@b.co' }, 'details'],
+      [{ plan: 'member', section: 'a', name: 'A', email: 'nope' }, 'details'],
+      [{ plan: 'member', section: 'zzz', name: 'A', email: 'a@b.co' }, 'error'],
+      [{ plan: 'dropin', slot: 'a|2026-10-20', name: 'A', email: 'a@b.co' }, 'error'],
+    ]) {
+      const res = await s.post('/checkout', form);
+      assert.match(res.headers.get('location'), new RegExp(`${flag}=1`));
+    }
+    const h = await s.html('/join?details=1');
+    assert.ok(h.includes('Please add your name and a valid email'));
+    s.close();
   });
 
-  test('capacity: at 60 enrolled, Checkout does not open and the page says full', async () => {
-    const stripe = fakeStripe({ completed: Array.from({ length: 60 }, () => enrollment()) });
-    const s = await serve({ stripe });
-    const res = await s.post('/checkout');
-    const html = await (await s.get(res.headers.get('location'))).text();
-    s.server.close();
-    assert.strictEqual(res.headers.get('location'), '/?full=1');
-    assert.strictEqual(stripe.calls.create.length, 0);
-    assert.ok(html.includes('All places are enrolled or currently held in checkout.'));
+  test('reservations survive a restart', async () => {
+    const dir = tmp();
+    const one = createLocalLedger({ program, dataDir: dir });
+    await one.begin({ plan: 'dropin', section: program.sections[2], date: '2026-10-18', source: 'direct', name: 'D', email: 'd@e.co' });
+    await one.flush();
+    const two = createLocalLedger({ program, dataDir: dir });
+    assert.strictEqual((await two.counts()).dropins['c|2026-10-18'], 1);
   });
 
-  test('capacity: other Stripe sales on the account are not counted', async () => {
-    const other = Array.from({ length: 80 }, () => enrollment({ metadata: { program: 'something-else' } }));
-    const noTag = Array.from({ length: 10 }, () => enrollment({ metadata: {} }));
-    const stripe = fakeStripe({ completed: [...other, ...noTag, enrollment()] });
-    let n = 0; for await (const _ of listEnrollments(stripe)) n++; // eslint-disable-line no-unused-vars
-    assert.strictEqual(n, 1);
-  });
-
-  test('capacity check failing closes enrollment rather than overselling', async () => {
-    const stripe = fakeStripe();
-    stripe.checkout.sessions.list = () => (async function* () { throw new Error('Stripe down'); })();
-    const s = await serve({ stripe });
-    const res = await s.post('/checkout');
-    s.server.close();
-    assert.strictEqual(res.headers.get('location'), '/?error=stripe');
-    assert.strictEqual(stripe.calls.create.length, 0);
-  });
-
-  test('behind an https proxy, return links use https', async () => {
-    const stripe = fakeStripe();
-    const s = await serve({ stripe });
-    await s.get('/checkout', { method: 'POST', headers: { 'X-Forwarded-Proto': 'https' } });
-    s.server.close();
-    assert.ok(stripe.calls.create[0].success_url.startsWith('https://'));
-  });
-
-  test('Stripe API error returns the user to the page with a notice', async () => {
-    const s = await serve({ stripe: fakeStripe({ createError: new Error('boom') }) });
-    const res = await s.post('/checkout');
-    s.server.close();
-    assert.strictEqual(res.headers.get('location'), '/?error=stripe');
+  test('interest and waitlist are saved; bots are dropped', async () => {
+    const ledger = seeded();
+    const s = await serve({ ledger });
+    assert.ok((await (await s.post('/interest', { email: 'a@b.co', name: 'A' })).text()).includes('Thank you.'));
+    assert.ok((await (await s.post('/interest', { email: 'c@d.co', section: 'a' })).text()).includes('waitlist'));
+    await s.post('/interest', { email: 'bot@x.co', website: 'spam' });
+    await ledger.flush();
+    assert.deepStrictEqual(ledger.all().leads.map((l) => l.lead), ['interest', 'waitlist']);
+    s.close();
   });
 });
 
-describe('confirmation page', () => {
-  test('paid session shows the confirmation copy', async () => {
-    const s = await serve({ stripe: fakeStripe({ session: enrollment() }) });
-    const res = await s.get('/enrolled?session_id=cs_test_abc');
-    s.server.close();
-    assert.strictEqual(res.status, 200);
-    const html = await res.text();
-    for (const text of [
-      'You’re in.', 'Welcome to Reading Club: The Good Life.', 'We begin October 15.',
-      'The club team will email you the readings and small-group joining details before the first class.',
-      'We look forward to reading with you.',
-    ]) assert.ok(html.includes(text), `missing: ${text}`);
-  });
-
-  test('bank payment still clearing: place held, not an error', async () => {
-    const s = await serve({ stripe: fakeStripe({ session: enrollment({ payment_status: 'unpaid' }) }) });
-    const res = await s.get('/enrolled?session_id=cs_test_abc');
-    s.server.close();
-    assert.strictEqual(res.status, 200);
-    const html = await res.text();
-    assert.ok(html.includes('Your payment is processing.'));
-    assert.ok(!html.includes('could not confirm'));
-  });
-
-  test('checkout not finished (e.g. card declined, tab closed) is not confirmed', async () => {
-    const s = await serve({ stripe: fakeStripe({ session: { status: 'open', payment_status: 'unpaid' } }) });
-    const res = await s.get('/enrolled?session_id=cs_test_abc');
-    s.server.close();
-    assert.strictEqual(res.status, 402);
-    assert.ok(!(await res.text()).includes('You’re in.'));
-  });
-
-  test('visiting /enrolled directly or with a forged id does not confirm', async () => {
-    const stripe = fakeStripe({ retrieveError: new Error('No such checkout.session') });
-    const s = await serve({ stripe });
-    for (const q of ['', '?session_id=', '?session_id=<script>', '?session_id=cs_test_forged']) {
-      const res = await s.get('/enrolled' + q);
-      assert.strictEqual(res.status, 400, q);
-      assert.ok(!(await res.text()).includes('You’re in.'));
-    }
-    s.server.close();
-    assert.deepStrictEqual(stripe.calls.retrieve, ['cs_test_forged'], 'malformed ids never reach Stripe');
+describe('codes and sources', () => {
+  test('a code link is remembered, shown, and prefilled', async () => {
+    const s = await serve();
+    const res = await s.get('/?code=spring&src=journal');
+    const cookies = res.headers.getSetCookie().map((c) => c.split(';')[0]).join('; ');
+    assert.ok((await res.text()).includes('Code <strong>SPRING</strong> will be applied'));
+    assert.ok((await s.html('/join', { headers: { cookie: cookies } })).includes('value="SPRING"'));
+    s.close();
   });
 });
 
-describe('launch safeguards', () => {
-  test('pending class details or a closed enrollment flag block checkout even with keys', async () => {
-    for (const opts of [{ details: { ...details, location: '' } }, { enrollmentOpen: false }]) {
-      const stripe = fakeStripe();
-      const s = await serve({ stripe, ...opts });
-      try {
-        const html = await (await s.get('/')).text();
-        assert.ok(html.includes('Enrollment opens soon'));
-        assert.strictEqual((await s.post('/checkout')).headers.get('location'), '/');
-        assert.strictEqual(stripe.calls.create.length, 0);
-      } finally { s.server.close(); }
-    }
+describe('member sign-in', () => {
+  const rows = [{ plan: 'member', section: 'a', email: 'ann@x.co' }, { plan: 'dropin', section: 'c', date: '2026-10-18', email: 'dan@x.co' }];
+  const privateInfo = { sections: { a: { zoom: 'https://zoom.us/j/111' } }, lecture: { address: '123 Example St' } };
+
+  test('tokens verify, expire, and reject tampering', () => {
+    const tok = makeToken('Ann@X.co', SECRET, 1, 0);
+    assert.strictEqual(readToken(tok, SECRET, 1000), 'ann@x.co');
+    assert.strictEqual(readToken(tok, SECRET, 2 * 86400000), null);
+    assert.strictEqual(readToken(tok, 'other', 1000), null);
+    assert.strictEqual(readToken(`${tok}x`, SECRET, 1000), null);
   });
 
-  test('published details are escaped, including literal dollar substitutions', async () => {
-    const s = await serve({ stripe: fakeStripe(), details: { ...details, location: '<script>alert(1)</script> $&' } });
-    try {
-      const html = await (await s.get('/')).text();
-      assert.ok(html.includes('&lt;script&gt;alert(1)&lt;/script&gt; $&amp;'));
-      assert.ok(!html.includes('<!--LOCATION-->'));
-    } finally { s.server.close(); }
+  test('only emails with a seat get a link, and the reply is identical either way', async () => {
+    const s = await serve({ ledger: seeded(rows) });
+    const a = await (await s.post('/login', { email: 'ANN@x.co' })).text();
+    const b = await (await s.post('/login', { email: 'nobody@x.co' })).text();
+    assert.strictEqual(a, b);
+    assert.strictEqual(s.sent.length, 1);
+    assert.match(s.sent[0].text, /\/my\?t=/);
+    assert.match((await s.post('/login', { email: 'bad' })).headers.get('location'), /invalid=1/);
+    s.close();
   });
 
-  test('wrong program, amount, currency, mode and incomplete payments cannot confirm enrollment', async () => {
-    for (const extra of [{ metadata: {} }, { metadata: { program: 'other' } }, { amount_total: 100 },
-      { currency: 'eur' }, { mode: 'subscription' }, { status: 'open' }, { payment_status: 'no_payment_required' }]) {
-      const s = await serve({ stripe: fakeStripe({ session: enrollment(extra) }) });
-      try {
-        const res = await s.get('/enrolled?session_id=cs_test_abc');
-        assert.strictEqual(res.status, 402);
-        assert.strictEqual(res.headers.get('cache-control'), 'no-store');
-        assert.ok(!(await res.text()).includes('You’re in.'));
-      } finally { s.server.close(); }
-    }
-  });
-
-  test('open reservations count, expired and unrelated checkouts do not', async () => {
-    const stripe = fakeStripe({ completed: [enrollment(),
-      enrollment({ status: 'open', expires_at: Date.now() / 1000 + 600 }),
-      enrollment({ status: 'open', expires_at: Date.now() / 1000 - 1 }),
-      enrollment({ status: 'expired' }), enrollment({ metadata: { program: 'other' } })] });
-    assert.strictEqual(await countReservedSeats(stripe), 2);
-  });
-
-  test('an open checkout for the final seat blocks another sale', async () => {
-    const stripe = fakeStripe({ completed: [enrollment({ status: 'open', expires_at: Date.now() / 1000 + 600 })] });
-    const s = await serve({ stripe, capacity: 1 });
-    try {
-      assert.strictEqual((await s.post('/checkout')).headers.get('location'), '/?full=1');
-      assert.strictEqual(stripe.calls.create.length, 0);
-    } finally { s.server.close(); }
-  });
-
-  test('concurrent requests cannot both create a checkout in one process', async () => {
-    const stripe = fakeStripe();
-    let release;
-    let entered;
-    const didEnter = new Promise((resolve) => { entered = resolve; });
-    stripe.prices.retrieve = async () => { entered(); await new Promise((resolve) => { release = resolve; }); return GOOD_PRICE; };
-    const s = await serve({ stripe, capacity: 1 });
-    try {
-      const first = s.post('/checkout');
-      await didEnter;
-      assert.strictEqual((await s.post('/checkout')).headers.get('location'), '/?error=busy');
-      release();
-      assert.ok((await first).headers.get('location').startsWith('https://checkout.stripe.com'));
-      assert.strictEqual(stripe.calls.create.length, 1);
-    } finally { release?.(); s.server.close(); }
-  });
-
-  test('a price archived after an earlier checkout is rejected', async () => {
-    const stripe = fakeStripe();
-    const s = await serve({ stripe });
-    try {
-      await s.post('/checkout');
-      stripe.prices.retrieve = async () => ({ ...GOOD_PRICE, active: false });
-      assert.strictEqual((await s.post('/checkout')).headers.get('location'), '/?error=price');
-      assert.strictEqual(stripe.calls.create.length, 1);
-    } finally { s.server.close(); }
-  });
-
-  test('checkout only accepts cards and expires abandoned sessions', () => {
-    const params = checkoutParams(PRICE_ID, 'https://example.com');
-    assert.deepStrictEqual(params.payment_method_types, ['card']);
-    assert.ok(params.expires_at > Date.now() / 1000 + 1800);
-    assert.ok(params.expires_at <= Date.now() / 1000 + 1860);
-  });
-
-  test('production requires a trusted HTTPS origin and a valid capacity', () => {
-    for (const siteUrl of [undefined, 'http://example.com', 'https://example.com/path', 'https://a:b@example.com', 'https://example.com/?x=1']) {
-      assert.throws(() => validateConfig({ siteUrl, capacity: 60, production: true }));
-    }
-    for (const capacity of [NaN, 0, -1, 1.5, Infinity]) assert.throws(() => validateConfig({ capacity }));
-    assert.strictEqual(validateConfig({ siteUrl: 'https://example.com/', capacity: 60, production: true }), 'https://example.com');
-  });
-
-  test('roster cells cannot become spreadsheet formulas', () => {
-    for (const input of ['=1+1', '+cmd', '-1', '@SUM(A1)', '  =1', '\t=1']) {
-      assert.ok(csv(input).startsWith('"\''));
-    }
-    assert.strictEqual(csv('Jane "J" Doe'), '"Jane ""J"" Doe"');
+  test('member page shows only their own private links', async () => {
+    const s = await serve({ ledger: seeded(rows), privateInfo });
+    const ann = await s.html(`/my?t=${makeToken('ann@x.co', SECRET)}`);
+    assert.ok(ann.includes('Section A') && ann.includes('zoom.us/j/111') && ann.includes('123 Example St'));
+    const dan = await s.html(`/my?t=${makeToken('dan@x.co', SECRET)}`);
+    assert.ok(dan.includes('Drop-in') && dan.includes('Coming by email'));
+    assert.ok(!dan.includes('zoom.us/j/111'));
+    const ics = await s.html(`/my/calendar.ics?t=${makeToken('ann@x.co', SECRET)}`);
+    assert.strictEqual((ics.match(/BEGIN:VEVENT/g) || []).length, 18);
+    assert.match((await s.get('/my?t=forged.x')).headers.get('location'), /expired=1/);
+    s.close();
   });
 });
 
-// Real Stripe SDK against stripe-mock (Stripe's official API mock), which
-// validates requests against Stripe's OpenAPI spec. Skipped if not running.
-describe('Stripe API contract (stripe-mock)', () => {
-  const mock = new Stripe('sk_test_123', { host: 'localhost', port: 12111, protocol: 'http' });
-  let up = false;
-  before(async () => { up = await fetch('http://localhost:12111/v1/prices', { headers: { Authorization: 'Bearer sk_test_123' } }).then(() => true, () => false); });
+describe('Stripe mode (for when keys are added)', () => {
+  const section = program.sections[0];
+  const base = 'https://x.org';
 
-  test('Checkout Session params are accepted by the Stripe API', async (t) => {
-    if (!up) return t.skip('stripe-mock not running');
-    const session = await mock.checkout.sessions.create(checkoutParams('price_1234', 'https://club.example'));
-    assert.strictEqual(session.object, 'checkout.session');
+  test('checkout params: subscription for members, saved card for drop-ins, one discount rule', () => {
+    const m = checkoutParams({ program, plan: 'member', section, source: 'journal', priceId: 'p', base });
+    assert.strictEqual(m.mode, 'subscription');
+    assert.strictEqual(m.subscription_data.metadata.section, 'a');
+    assert.strictEqual(m.allow_promotion_codes, true);
+    const d = checkoutParams({ program, plan: 'dropin', section, date: '2026-10-19', source: 'direct', priceId: 'p', promo: 'promo_1', base });
+    assert.strictEqual(d.payment_intent_data.setup_future_usage, 'off_session');
+    assert.deepStrictEqual(d.discounts, [{ promotion_code: 'promo_1' }]);
+    assert.strictEqual(d.allow_promotion_codes, undefined);
   });
 
-  test('a bad parameter is rejected (the mock really validates)', async (t) => {
-    if (!up) return t.skip('stripe-mock not running');
-    await assert.rejects(mock.checkout.sessions.create({ ...checkoutParams('price_1234', 'https://x'), mode: 'monthly' }));
+  test('price checks catch a wrong amount or interval', () => {
+    const want = expectedPrices(program);
+    const good = { active: true, unit_amount: 45000, currency: 'usd', type: 'recurring', recurring: { interval: 'week', interval_count: 6 } };
+    assert.strictEqual(priceProblem(good, want.member), null);
+    assert.match(priceProblem({ ...good, recurring: { interval: 'month', interval_count: 1 } }, want.member), /interval/);
+    assert.match(priceProblem({ ...good, unit_amount: 1 }, want.member), /unit_amount/);
   });
 
-  test('the enrollment count query is valid', async (t) => {
-    if (!up) return t.skip('stripe-mock not running');
-    let n = 0; for await (const _ of listEnrollments(mock)) n++; // eslint-disable-line no-unused-vars
-    assert.ok(n >= 0);
-  });
-
-  test('Price and Session retrieval calls are valid', async (t) => {
-    if (!up) return t.skip('stripe-mock not running');
-    assert.strictEqual((await mock.prices.retrieve('price_1234')).object, 'price');
-    const s = await mock.checkout.sessions.retrieve('cs_test_abc');
-    assert.ok(['paid', 'unpaid', 'no_payment_required'].includes(s.payment_status));
+  test('the same site runs on Stripe: seats from subscriptions, codes looked up, redirect to checkout', async () => {
+    const stripe = fakeStripe({ program, subs: Array.from({ length: 20 }, () => ({ status: 'active', metadata: { program: program.program, plan: 'member', section: 'a' } })), promos: { SPRING: 'promo_S' } });
+    const ledger = createStripeLedger({ stripe, program, prices: { member: 'price_member', dropin: 'price_dropin' }, log: quietLog });
+    const s = await serve({ ledger });
+    const h = await s.html('/join');
+    assert.match(h, /value="a" disabled/);
+    assert.ok(h.includes('Continue to payment') && !h.includes('id="j-email"'));
+    let res = await s.post('/checkout', { plan: 'member', section: 'b', code: 'SPRING' });
+    assert.match(res.headers.get('location'), /checkout\.stripe\.com/);
+    assert.deepStrictEqual(stripe.calls.create[0].discounts, [{ promotion_code: 'promo_S' }]);
+    res = await s.post('/checkout', { plan: 'member', section: 'b', code: 'NOPE' });
+    assert.match(res.headers.get('location'), /badcode=1/);
+    s.close();
   });
 });

@@ -8,10 +8,7 @@ function loadLocalEnv() {
   catch (error) { if (error.code !== 'ENOENT') throw error; }
 }
 
-function validateConfig({ siteUrl, capacity, production }) {
-  if (!Number.isSafeInteger(capacity) || capacity < 1) {
-    throw new Error('ENROLLMENT_CAPACITY must be a positive whole number.');
-  }
+function validateConfig({ siteUrl, production }) {
   if (production && !siteUrl) throw new Error('SITE_URL is required in production.');
   if (siteUrl) {
     let url;
@@ -25,13 +22,14 @@ function validateConfig({ siteUrl, capacity, production }) {
   return undefined;
 }
 
-function missingDetails(details) {
-  const missing = ['startDate', 'lectureSchedule', 'smallGroupSchedule', 'location', 'refundPolicy']
-    .filter((key) => typeof details[key] !== 'string' || !details[key].trim());
-  if (typeof details.contactEmail !== 'string' || !/^[^\s@<>"&]+@[^\s@<>"&]+\.[^\s@<>"&]+$/.test(details.contactEmail)) {
-    missing.push('contactEmail');
+// "journal=promo_123,222=promo_456" -> { journal: 'promo_123', '222': 'promo_456' }
+function parseSourcePromos(v) {
+  const out = {};
+  for (const pair of String(v || '').split(',')) {
+    const [k, id] = pair.split('=').map((x) => (x || '').trim());
+    if (k && /^promo_/.test(id)) out[k.toLowerCase()] = id;
   }
-  return missing;
+  return out;
 }
 
-module.exports = { loadLocalEnv, validateConfig, missingDetails };
+module.exports = { loadLocalEnv, validateConfig, parseSourcePromos };
