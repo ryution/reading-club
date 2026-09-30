@@ -5,7 +5,7 @@
 const os = require('os');
 const fs = require('fs');
 const path = require('path');
-const { createApp, loadProgram } = require('../server');
+const { createApp, loadProgram } = require('../lib/app');
 const { createLocalLedger } = require('../lib/ledger-local');
 
 const program = loadProgram();

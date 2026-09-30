@@ -32,4 +32,14 @@ function parseSourcePromos(v) {
   return out;
 }
 
-module.exports = { loadLocalEnv, validateConfig, parseSourcePromos };
+// The public address used in emailed links. SITE_URL wins; on Vercel the
+// production domain is used when SITE_URL isn't set. Bad values are ignored
+// (links then use the request's own address) rather than taking the site down.
+function resolveSiteUrl(env = process.env, log = console) {
+  const production = env.NODE_ENV === 'production';
+  const candidate = env.SITE_URL || (env.VERCEL_PROJECT_PRODUCTION_URL ? `https://${env.VERCEL_PROJECT_PRODUCTION_URL}` : '');
+  if (!candidate) return undefined;
+  try { return validateConfig({ siteUrl: candidate, production }); } catch (err) { log.warn(`[config] ${err.message} Ignoring SITE_URL.`); return undefined; }
+}
+
+module.exports = { loadLocalEnv, validateConfig, resolveSiteUrl, parseSourcePromos };

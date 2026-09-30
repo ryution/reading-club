@@ -5,7 +5,7 @@ const assert = require('node:assert');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
-const { createApp, availability, cleanSource, cleanCode, loadProgram, sectionDates } = require('../server');
+const { createApp, availability, cleanSource, cleanCode, loadProgram, sectionDates } = require('../lib/app');
 const { parseSourcePromos, validateConfig } = require('../config');
 const { createLocalLedger } = require('../lib/ledger-local');
 const { createStripeLedger, checkoutParams, priceProblem, expectedPrices } = require('../lib/ledger-stripe');
@@ -153,7 +153,7 @@ describe('reserve a seat (no Stripe yet)', () => {
     const loc = res.headers.get('location');
     assert.match(loc, /^\/welcome\?id=r_/);
     await ledger.flush();
-    const r = ledger.all().reservations[0];
+    const r = (await ledger.all()).reservations[0];
     assert.deepStrictEqual([r.plan, r.section, r.email, r.source, r.code], ['member', 'b', 'ada@example.com', '222', 'JOURNAL']);
     const h = await s.html(loc);
     assert.ok(h.includes('Your seat is held.'));
@@ -180,7 +180,7 @@ describe('reserve a seat (no Stripe yet)', () => {
     const a = await s.post('/checkout', { plan: 'member', section: 'a', name: 'A', email: 'a@b.co' });
     const b = await s.post('/checkout', { plan: 'member', section: 'a', name: 'A', email: 'a@b.co' });
     assert.strictEqual(a.headers.get('location'), b.headers.get('location'));
-    assert.strictEqual(ledger.all().reservations.length, 1);
+    assert.strictEqual((await ledger.all()).reservations.length, 1);
     s.close();
   });
 
@@ -216,7 +216,7 @@ describe('reserve a seat (no Stripe yet)', () => {
     assert.ok((await (await s.post('/interest', { email: 'c@d.co', section: 'a' })).text()).includes('waitlist'));
     await s.post('/interest', { email: 'bot@x.co', website: 'spam' });
     await ledger.flush();
-    assert.deepStrictEqual(ledger.all().leads.map((l) => l.lead), ['interest', 'waitlist']);
+    assert.deepStrictEqual((await ledger.all()).leads.map((l) => l.lead), ['interest', 'waitlist']);
     s.close();
   });
 });
@@ -305,5 +305,42 @@ describe('Stripe mode (for when keys are added)', () => {
     res = await s.post('/checkout', { plan: 'member', section: 'b', code: 'NOPE' });
     assert.match(res.headers.get('location'), /badcode=1/);
     s.close();
+  });
+});
+
+describe('hosting', () => {
+  test('Redis store round-trips reservations through the Upstash REST API', async () => {
+    const lists = {};
+    const fakeFetch = async (url, { body, headers }) => {
+      assert.strictEqual(headers.Authorization, 'Bearer tok');
+      const [cmd, key, ...rest] = JSON.parse(body);
+      lists[key] = lists[key] || [];
+      if (cmd === 'RPUSH') { lists[key].push(rest[0]); return { ok: true, json: async () => ({ result: lists[key].length }) }; }
+      if (cmd === 'LRANGE') return { ok: true, json: async () => ({ result: lists[key] }) };
+      return { ok: false, status: 400, json: async () => ({ error: 'unknown' }) };
+    };
+    const { createRedisStore } = require('../lib/ledger-local');
+    const ledger = createLocalLedger({ program, store: createRedisStore({ url: 'https://x.upstash.io/', token: 'tok', fetchImpl: fakeFetch }) });
+    assert.strictEqual(ledger.storage, 'redis');
+    const r = await ledger.begin({ plan: 'member', section: program.sections[1], source: 'journal', name: 'A', email: 'a@b.co' });
+    assert.match(r.redirect, /welcome/);
+    assert.strictEqual((await ledger.counts()).members.b, 1);
+    assert.strictEqual((await ledger.receipt(r.reservation.id)).email, 'a@b.co');
+    await ledger.saveLead({ email: 'c@d.co', lead: 'interest', source: 'direct' });
+    assert.strictEqual((await ledger.all()).leads.length, 1);
+  });
+
+  test('on Vercel with no Redis the site still loads and signups stay closed', async () => {
+    const { execFileSync } = require('child_process');
+    const out = execFileSync(process.execPath, ['-e', `
+      const app = require('./server');
+      const s = app.listen(0, async () => {
+        const base = 'http://127.0.0.1:' + s.address().port;
+        const home = await fetch(base + '/');
+        const join = await (await fetch(base + '/join')).text();
+        console.log(JSON.stringify({ home: home.status, closed: join.includes('Signups open soon'), health: (await fetch(base + '/healthz')).status }));
+        s.close();
+      });`], { cwd: path.join(__dirname, '..'), env: { ...process.env, VERCEL: '1', NODE_ENV: 'production', SITE_URL: '', STRIPE_SECRET_KEY: '', KV_REST_API_URL: '', DATA_DIR: '' }, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] });
+    assert.deepStrictEqual(JSON.parse(out.trim().split('\n').pop()), { home: 200, closed: true, health: 200 });
   });
 });

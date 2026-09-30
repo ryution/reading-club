@@ -5,7 +5,7 @@ const { test } = require('node:test');
 const assert = require('node:assert');
 const net = require('net');
 const Stripe = require('stripe');
-const { loadProgram } = require('../server');
+const { loadProgram } = require('../lib/app');
 const { createStripeLedger, checkoutParams } = require('../lib/ledger-stripe');
 
 const program = loadProgram();

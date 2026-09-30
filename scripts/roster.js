@@ -5,7 +5,7 @@
 // Reads Stripe when STRIPE_SECRET_KEY is set, otherwise the local reservations file.
 const path = require('path');
 const { loadLocalEnv } = require('../config');
-const { loadProgram } = require('../server');
+const { loadProgram } = require('../lib/app');
 
 loadLocalEnv();
 // Cells starting with = + - @ are escaped so spreadsheets don't run them as formulas.
@@ -35,8 +35,11 @@ const program = loadProgram();
     }
     return out(['name', 'email', 'plan', 'section', 'dropin_date', 'source', 'amount_usd', 'status', 'signed_up'], rows.reverse());
   }
-  const { createLocalLedger } = require('../lib/ledger-local');
-  const db = createLocalLedger({ program, dataDir: process.env.DATA_DIR || path.join(__dirname, '..', 'data') }).all();
+  const { createFileStore, createRedisStore } = require('../lib/ledger-local');
+  const e = process.env;
+  const url = e.KV_REST_API_URL || e.UPSTASH_REDIS_REST_URL;
+  const token = e.KV_REST_API_TOKEN || e.UPSTASH_REDIS_REST_TOKEN;
+  const db = await (url && token ? createRedisStore({ url, token }) : createFileStore(e.DATA_DIR || path.join(__dirname, '..', 'data'))).load();
   if (leads) return out(['name', 'email', 'type', 'section', 'source', 'joined_on'], db.leads.map((l) => [l.name, l.email, l.lead, l.section, l.source, l.createdAt.slice(0, 10)]));
   return out(['name', 'email', 'plan', 'section', 'dropin_date', 'source', 'code', 'amount_due_usd', 'status', 'reserved_on'],
     db.reservations.filter((r) => r.program === program.program).map((r) => [r.name, r.email, r.plan, r.section, r.date || '', r.source, r.code || '', r.amount, r.status, r.createdAt.slice(0, 10)]));

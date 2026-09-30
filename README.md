@@ -62,25 +62,35 @@ npm test
 
 `npm test` includes Stripe contract tests that run against [stripe-mock](https://github.com/stripe/stripe-mock) on port 12111. They are skipped if it isn't running.
 
-## Deploy (Render)
+## Deploy on Vercel (current)
 
-`render.yaml` sets up one web service with a 1 GB disk at `/var/data`, which keeps reservations across deploys. It also generates `LOGIN_SECRET` and sets `ENROLLMENT_OPEN=false`.
+The site is live at reading-club-rho.vercel.app. Vercel runs `server.js` as a function and serves `public/` directly.
 
-1. In Render, create a new Blueprint from this repository.
-2. Set `SITE_URL` to the site's https address (no path).
-3. Set `RESEND_API_KEY` and `MAIL_FROM` (verify the sending domain in Resend first), and optionally `NOTIFY_EMAIL`.
-4. Fill in `program.json` and `private.json`, then set `ENROLLMENT_OPEN=true`.
-5. Later, add the three Stripe variables to switch on payments.
+Vercel can't keep files between requests, so reservations need a database. Until one is connected, the site loads but signups stay closed ("Signups open soon").
 
-Run exactly one instance. Reservations live in one file on one disk.
+1. In the Vercel project, open **Storage**, choose **Upstash for Redis** (free tier is plenty), and connect it to this project. That adds `KV_REST_API_URL` and `KV_REST_API_TOKEN` for you.
+2. Under **Settings → Environment Variables**, add:
+   - `LOGIN_SECRET`: any long random string
+   - `RESEND_API_KEY` and `MAIL_FROM`, for confirmation and sign-in emails
+   - `NOTIFY_EMAIL`, optional: gets a note for every signup
+   - `PRIVATE_JSON`: the contents of `private.json` (Zoom links and so on), pasted as one line
+   - `ENROLLMENT_OPEN=false` until Cole confirms the section times, then remove it or set it to `true`
+3. Redeploy.
+
+Set `SITE_URL` once there's a custom domain. Until then, emailed links use the Vercel production address.
+
+## Deploy on Render (alternative)
+
+`render.yaml` sets up one web service with a 1 GB disk at `/var/data`, which keeps reservations as a file. Create a Blueprint from this repository, set `SITE_URL`, the Resend variables and `ENROLLMENT_OPEN`, and run exactly one instance.
 
 ## Files
 
-- `server.js`: routes
+- `server.js`: reads settings and starts the site (or hands it to Vercel)
+- `lib/app.js`: routes
 - `config.js`: env loading and checks
 - `lib/pages.js`: every page
 - `public/styles.css`: the design
-- `lib/ledger-local.js`: seat reservations, used while Stripe is off
+- `lib/ledger-local.js`: seat reservations while Stripe is off, stored in Redis or a file
 - `lib/ledger-stripe.js`: Stripe Checkout, subscriptions and seat counts
 - `lib/login.js`: sign-in links and email
 - `lib/schedule.js` and `lib/calendar.js`: dates and .ics files
