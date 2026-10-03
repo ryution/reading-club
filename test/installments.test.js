@@ -99,6 +99,7 @@ test('checkout requires commitment consent and explicitly shows zero upfront and
   assert.match(result.redirect, /checkout.stripe.com/);
   const request = f.stripe.calls.create[0];
   assert.equal(request.mode, 'setup');
+  assert.equal(request.custom_fields, undefined, 'Stripe setup mode does not support custom fields');
   assert.equal(request.line_items, undefined);
   assert.match(request.custom_text.submit.message, /18 weekly card payments of \$25/);
   assert.match(request.custom_text.submit.message, /after the course ends/);
