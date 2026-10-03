@@ -50,7 +50,7 @@ With email configured, signed Stripe webhooks deliver confirmation emails even i
 
 Checkout requests are serialized within one process, and open Stripe Checkout Sessions reserve seats for 31 minutes. Repeated submissions of the same form reuse the same Stripe idempotency key and request while the process is alive. Capacity is still an operational limit, not a distributed transaction: overlapping instances, deploys, API list visibility and another selling application can oversell. Do not horizontally scale without a transactional shared reservation store. Completed canceled/refunded purchases can conservatively hold capacity until manually reconciled. Run one instance and close enrollment during migration/deployment near capacity.
 
-Membership billing repeats from purchase; the displayed class schedule covers the configured six-week course only. Publish the next course's schedule and reconcile subscription seats before a term rollover. Refunding a subscription payment does not cancel the subscription; use Stripe cancellation when revoking membership.
+Legacy membership billing repeats from purchase; the displayed class schedule covers the configured six-week course only. Publish the next course's schedule and reconcile subscription seats before a term rollover. Refunding a subscription payment does not cancel the subscription; use Stripe cancellation when revoking membership.
 
 ## Sources, codes and operations
 
@@ -61,3 +61,16 @@ Membership billing repeats from purchase; the displayed class schedule covers th
 `/healthz` checks the process only. Use the payment audit and a real Stripe test-mode signup to assess checkout readiness.
 
 References: [Stripe fulfillment](https://docs.stripe.com/checkout/fulfillment), [Stripe Checkout](https://docs.stripe.com/api/checkout/sessions/create), [Render environment variables](https://render.com/docs/environment-variables).
+## Fixed tuition installments (October 2026 revision)
+
+The current offer is one six-week course with a $450 tuition commitment, collected as **18 weekly payments of $25 on Mondays**. Payments continue after the course ends. There is no upfront charge and no automatic new-term enrollment. The first charge is the Monday after signup; Stripe's native schedule ends after 18 weekly cycles (`end_behavior: cancel`). Retries may settle a failed installment later; an authorization does not guarantee collection.
+
+Set `INSTALLMENT_PRICE_ID` to a live $25 USD weekly recurring price and `INSTALLMENT_PORTAL_CONFIG_ID` to a separate portal with invoice history/card updates enabled and subscription cancellation/plan switching disabled. Retain the original `MEMBER_PRICE_ID` and `BILLING_PORTAL_CONFIG_ID` for legacy receipts and purchases. Do not migrate existing customers without their agreement.
+
+The restricted server key additionally needs **Setup Intents: Read** and **Subscriptions: Write**. Setup Checkout collects a card; the verified completion webhook creates the finite Stripe schedule. The webhook must be configured before sales open. It returns an error for incomplete scheduling so Stripe retries. Repeated webhooks and confirmation-page visits reuse the schedule using both Stripe metadata lookup and an idempotency key. Run one app instance; in-process enrollment locks do not support multiple instances.
+
+The checkbox and Stripe confirmation text disclose the full commitment, first payment date, and duration. Membership discounts are not applied to this fixed plan; contact the club to arrange a separately agreed offer. Drop-in promotions continue to work. New full-term enrollment closes when the course starts. Card failures restrict course access but preserve access to billing. Class attendance does not trigger or skip installments.
+
+Operations: approved refunds/cancellations must cancel the **subscription schedule**, and separately handle any agreed refund or open invoice in Stripe. Do not merely refund one charge while leaving future installments active. Review failed webhook deliveries and past-due subscriptions in Stripe. A delayed setup whose agreed start date has already passed is flagged for review rather than backdating a charge. Customer support and card-authentication recovery must be monitored; no Resend service is configured.
+
+Validation: `npm test` includes schedule duration/end behavior, DST/Monday dates, duplicate enrollment, consent, legacy compatibility and delinquent-member recovery. Mock/unit success does not prove real issuer approval or settlement. `npm run verify:payments` audits the production price, mode, webhook and portal. Before claiming end-to-end collection, verify a test-mode completed setup and scheduled invoice with Stripe test clocks, including authentication and decline handling.

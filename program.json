@@ -7,31 +7,33 @@
   "instagram": "https://www.instagram.com/joinphilosophy/",
   "contactEmail": "",
   "refundPolicy": "",
-  "termStarts": "2026-10-15",
+  "termStarts": "2026-10-18",
   "weeks": 6,
   "timezone": "America/New_York",
-  "hoursPerWeek": 3,
+  "hoursPerWeek": 2.5,
   "memberPrice": 450,
+  "billing": { "model": "weekly-25-v1", "amount": 25, "payments": 18, "weekday": "Monday" },
   "dropInPrice": 40,
   "texts": [
-    { "name": "Aristotle", "tradition": "Greek philosophy" },
-    { "name": "Confucius", "tradition": "Chinese philosophy" },
-    { "name": "Laozi", "tradition": "Daoism" },
-    { "name": "Proverbs", "tradition": "Hebrew wisdom" },
-    { "name": "Bhagavad Gita", "tradition": "Hindu philosophy" },
-    { "name": "Dhammapada", "tradition": "Buddhism" }
+    { "name": "Aristotle", "tradition": "Greek philosophy", "work": "Nicomachean Ethics", "question": "What is the highest human good?" },
+    { "name": "Confucius", "tradition": "Chinese philosophy", "work": "Analects", "question": "How does a person become good?" },
+    { "name": "Laozi", "tradition": "Daoism", "work": "Daodejing", "question": "When should we stop striving?" },
+    { "name": "Proverbs", "tradition": "Hebrew wisdom", "question": "What does wisdom look like in ordinary life?" },
+    { "name": "Bhagavad Gita", "tradition": "Hindu philosophy", "question": "What should I do when duty conflicts with desire?" },
+    { "name": "Dhammapada", "tradition": "Buddhism", "question": "What makes us free?" }
   ],
   "lecture": {
     "label": "Weekly lecture",
-    "weekday": 4,
-    "time": "19:00",
-    "minutes": 60,
-    "where": "In person in New York, filmed and shared with every member"
+    "weekday": 0,
+    "time": "11:00",
+    "minutes": 90,
+    "where": "167 East Broadway, New York. Recorded and shared with members"
   },
+  "officeHours": { "label": "Optional office hours", "weekday": 4, "time": "19:00", "minutes": 60, "where": "Zoom", "dateOverrides": { "2026-11-26": "2026-11-25" } },
   "sections": [
-    { "id": "a", "name": "Section A", "weekdays": [1, 3], "time": "19:00", "minutes": 60, "where": "Zoom", "capacity": 20, "facilitator": "" },
-    { "id": "b", "name": "Section B", "weekdays": [2, 5], "time": "12:30", "minutes": 60, "where": "Zoom", "capacity": 20, "facilitator": "" },
-    { "id": "c", "name": "Section C", "weekdays": [0, 3], "time": "10:00", "minutes": 60, "where": "Zoom", "capacity": 20, "facilitator": "" }
+    { "id": "a", "name": "Section A", "weekdays": [1], "time": "19:00", "minutes": 60, "where": "Zoom", "capacity": 20, "facilitator": "" },
+    { "id": "b", "name": "Section B", "weekdays": [2], "time": "12:30", "minutes": 60, "where": "Zoom", "capacity": 20, "facilitator": "" },
+    { "id": "c", "name": "Section C", "weekdays": [3], "time": "10:00", "minutes": 60, "where": "Zoom", "capacity": 20, "facilitator": "" }
   ],
   "teacher": {
     "name": "Cole",

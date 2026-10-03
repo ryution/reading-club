@@ -15,6 +15,14 @@ const { makeToken, readToken } = require('../lib/login');
 const { fakeStripe } = require('./fake-stripe');
 
 const program = loadProgram();
+delete program.billing; // Regression coverage for the original purchase flow.
+program.termStarts = '2026-10-15';
+program.hoursPerWeek = 3;
+program.lecture.weekday = 4;
+program.lecture.time = '19:00';
+program.lecture.minutes = 60;
+delete program.officeHours;
+program.sections.forEach((s, i) => { s.weekdays = [[1, 3], [2, 5], [0, 3]][i]; });
 const quietLog = { error() {}, warn() {}, log() {} };
 const BEFORE_TERM = () => new Date('2026-10-01T15:00:00Z');
 const SECRET = 'test-secret';

@@ -317,6 +317,11 @@ details.code summary { cursor: pointer; color: var(--ink); text-decoration: unde
 .login-card { max-width: 28rem; margin: 1.5rem 0; }
 
 /* ---------- footer ---------- */
+.t-question { grid-column: 2 / -1; margin: .3rem 0 0; font-family: var(--serif); color: var(--ink-soft); }
+.reading-method { padding-left: 1.3rem; display: grid; gap: 1rem; margin: 2rem 0; }
+.commitment { background: var(--paper-hi); border: 1px solid var(--rule-strong); padding: 1.25rem; border-radius: var(--radius); }
+.consent { display: flex; gap: .8rem; align-items: flex-start; line-height: 1.6; cursor: pointer; }
+.consent input { flex: none; width: 1.25rem; height: 1.25rem; margin-top: .2rem; accent-color: var(--ink); }
 .site-footer { border-top: 1px solid var(--rule); padding: 3rem 0 2.5rem; text-align: center; }
 .press { display: grid; justify-items: center; padding-bottom: 2.5rem; margin-bottom: 2.5rem; border-bottom: 1px solid var(--rule); }
 .press img { height: 56px; width: auto; }

@@ -10,6 +10,7 @@ const checks = [];
 const check = (name, ok, detail) => checks.push({ check: name, pass: Boolean(ok), detail });
 async function main() {
   const required = ['STRIPE_SECRET_KEY', 'MEMBER_PRICE_ID', 'DROPIN_PRICE_ID', 'STRIPE_WEBHOOK_SECRET', 'LOGIN_SECRET', 'BILLING_PORTAL_CONFIG_ID'];
+  if (loadProgram().billing?.model === 'weekly-25-v1') required.push('INSTALLMENT_PRICE_ID', 'INSTALLMENT_PORTAL_CONFIG_ID');
   if (env.EMAIL_DELIVERY_MODE !== 'on_page') required.push('RESEND_API_KEY', 'MAIL_FROM');
   check('Access delivery', true, env.EMAIL_DELIVERY_MODE === 'on_page' ? 'on confirmation page; email recovery unavailable' : 'email');
   for (const key of required) check(key, env[key], env[key] ? 'configured' : 'missing');
@@ -47,6 +48,17 @@ async function main() {
       : portals.data.find((p) => p.is_default);
     check('Billing portal cancellation', portal?.active && portal?.features?.subscription_cancel?.enabled, portal?.id || 'missing configuration');
     check('Billing portal card updates', portal?.features?.payment_method_update?.enabled, portal?.id || 'missing configuration');
+    if (env.INSTALLMENT_PRICE_ID) {
+      const p = await stripe.prices.retrieve(env.INSTALLMENT_PRICE_ID);
+      const problem = priceProblem(p, { unit_amount: 2500, currency: 'usd', type: 'recurring', interval: 'week', interval_count: 1 });
+      check('Weekly installment price', !problem && p.livemode === live, problem || '$25 weekly; schedule limits to 18 cycles');
+      await stripe.subscriptionSchedules.list({ limit: 1 });
+      check('Schedule read access', true, 'available');
+    }
+    if (env.INSTALLMENT_PORTAL_CONFIG_ID) {
+      const p = await stripe.billingPortal.configurations.retrieve(env.INSTALLMENT_PORTAL_CONFIG_ID);
+      check('Fixed commitment portal', p.active && !p.features.subscription_cancel.enabled && !p.features.subscription_update.enabled && p.features.payment_method_update.enabled && p.features.invoice_history.enabled, p.id);
+    }
   }
 }
 main().catch((error) => { check('API access', false, `${error.type || 'Error'}: verification could not complete`); }).finally(() => {

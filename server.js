@@ -24,8 +24,9 @@ function pickLedger() {
     console.log('[payments] Stripe checkout is on.');
     return createStripeLedger({
       stripe, program,
-      prices: { member: env.MEMBER_PRICE_ID, dropin: env.DROPIN_PRICE_ID },
+      prices: { member: env.MEMBER_PRICE_ID, dropin: env.DROPIN_PRICE_ID, installment: env.INSTALLMENT_PRICE_ID },
       portalConfiguration: env.BILLING_PORTAL_CONFIG_ID,
+      installmentPortalConfiguration: env.INSTALLMENT_PORTAL_CONFIG_ID,
       sourcePromos: parseSourcePromos(env.SOURCE_PROMOS),
     });
   }

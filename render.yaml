@@ -37,6 +37,10 @@ services:
         sync: false
       - key: MEMBER_PRICE_ID
         sync: false
+      - key: INSTALLMENT_PRICE_ID
+        sync: false
+      - key: INSTALLMENT_PORTAL_CONFIG_ID
+        sync: false
       - key: DROPIN_PRICE_ID
         sync: false
       - key: SOURCE_PROMOS

@@ -8,6 +8,7 @@ const { resolveSiteUrl } = require('../config');
 const { readToken, makeToken } = require('../lib/login');
 const { fakeStripe } = require('./fake-stripe');
 const program = loadProgram();
+delete program.billing; // Legacy purchases keep their original subscription terms.
 const quiet = { error() {}, warn() {}, log() {} };
 const prices = { member: 'price_member', dropin: 'price_dropin' };
 const secret = 'payment-tests-only';
