@@ -30,8 +30,8 @@ const program = loadProgram();
     for await (const s of listSignups(stripe, program)) {
       const md = s.metadata;
       const name = (s.custom_fields || []).find((f) => f.key === 'full_name');
-      rows.push([name && name.text ? name.text.value : '', s.customer_details ? s.customer_details.email : '', md.plan, md.section, md.date || '', md.source,
-        (s.amount_total / 100).toFixed(2), s.payment_status === 'unpaid' ? 'processing' : 'paid', day(s.created)]);
+      rows.push([md.member_name || (name && name.text ? name.text.value : ''), s.customer_details ? s.customer_details.email : '', md.plan, md.section, md.date || '', md.source,
+        ((s.amount_total || 0) / 100).toFixed(2), s.mode === 'setup' ? 'card_saved_check_installments' : s.payment_status === 'unpaid' ? 'processing' : 'paid', day(s.created)]);
     }
     return out(['name', 'email', 'plan', 'section', 'dropin_date', 'source', 'amount_usd', 'status', 'signed_up'], rows.reverse());
   }
