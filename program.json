@@ -12,7 +12,7 @@
   "timezone": "America/New_York",
   "hoursPerWeek": 2.5,
   "memberPrice": 450,
-  "billing": { "model": "weekly-25-v1", "amount": 25, "payments": 18, "weekday": "Monday" },
+  "billing": { "model": "upfront-450-v1", "includedSessions": 18, "sessionEquivalent": 25 },
   "dropInPrice": 40,
   "texts": [
     { "name": "Aristotle", "tradition": "Greek philosophy", "work": "Nicomachean Ethics", "question": "What is the highest human good?" },

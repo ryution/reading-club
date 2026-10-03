@@ -14,7 +14,7 @@ loadLocalEnv();
 const env = process.env;
 const program = loadProgram();
 const onVercel = Boolean(env.VERCEL);
-const paymentKeys = ['STRIPE_SECRET_KEY', 'MEMBER_PRICE_ID', 'DROPIN_PRICE_ID'];
+const paymentKeys = ['STRIPE_SECRET_KEY', 'MEMBER_PRICE_ID', 'DROPIN_PRICE_ID', ...(program.billing?.model === 'upfront-450-v1' ? ['TUITION_PRICE_ID'] : [])];
 const partialStripe = paymentKeys.some((key) => env[key]) && !paymentKeys.every((key) => env[key]);
 const stripe = env.STRIPE_SECRET_KEY ? new (require('stripe'))(env.STRIPE_SECRET_KEY, { maxNetworkRetries: 2, timeout: 15000 }) : null;
 if (partialStripe) console.error('[payments] Incomplete Stripe configuration. Enrollment is closed.');
@@ -24,7 +24,7 @@ function pickLedger() {
     console.log('[payments] Stripe checkout is on.');
     return createStripeLedger({
       stripe, program,
-      prices: { member: env.MEMBER_PRICE_ID, dropin: env.DROPIN_PRICE_ID, installment: env.INSTALLMENT_PRICE_ID },
+      prices: { member: env.MEMBER_PRICE_ID, dropin: env.DROPIN_PRICE_ID, installment: env.INSTALLMENT_PRICE_ID, tuition: env.TUITION_PRICE_ID },
       portalConfiguration: env.BILLING_PORTAL_CONFIG_ID,
       installmentPortalConfiguration: env.INSTALLMENT_PORTAL_CONFIG_ID,
       sourcePromos: parseSourcePromos(env.SOURCE_PROMOS),

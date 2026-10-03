@@ -6,6 +6,7 @@ const { createStripeLedger } = require('../lib/ledger-stripe');
 const { createApp, loadProgram } = require('../lib/app');
 const { fakeStripe } = require('./fake-stripe');
 const program = loadProgram();
+program.billing = { model: VERSION }; // Preserve prior installment commitments only.
 const future = nextMonday(program.timezone);
 function fixture() {
   const sessions = [{ id: 'cs_test_setup', customer: 'cus_1', mode: 'setup', status: 'complete',
