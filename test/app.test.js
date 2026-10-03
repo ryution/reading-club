@@ -255,17 +255,17 @@ describe('member sign-in', () => {
     s.close();
   });
 
-  test('member page shows only their own private links', async () => {
+  test('member page shows only their own private links', async (t) => {
     const s = await serve({ ledger: seeded(rows), privateInfo });
+    t.after(() => s.close());
     const ann = await s.html(`/my?t=${makeToken('ann@x.co', SECRET)}`);
     assert.ok(ann.includes('Section A') && ann.includes('zoom.us/j/111') && ann.includes('123 Example St'));
     const dan = await s.html(`/my?t=${makeToken('dan@x.co', SECRET)}`);
-    assert.ok(dan.includes('Drop-in') && dan.includes('Coming by email'));
+    assert.ok(dan.includes('Drop-in') && dan.includes('Will be posted here'));
     assert.ok(!dan.includes('zoom.us/j/111'));
     const ics = await s.html(`/my/calendar.ics?t=${makeToken('ann@x.co', SECRET)}`);
     assert.strictEqual((ics.match(/BEGIN:VEVENT/g) || []).length, 18);
     assert.match((await s.get('/my?t=forged.x')).headers.get('location'), /expired=1/);
-    s.close();
   });
 });
 

@@ -9,17 +9,23 @@ const env = process.env;
 const checks = [];
 const check = (name, ok, detail) => checks.push({ check: name, pass: Boolean(ok), detail });
 async function main() {
-  const required = ['STRIPE_SECRET_KEY', 'MEMBER_PRICE_ID', 'DROPIN_PRICE_ID', 'STRIPE_WEBHOOK_SECRET', 'LOGIN_SECRET', 'RESEND_API_KEY', 'MAIL_FROM'];
+  const required = ['STRIPE_SECRET_KEY', 'MEMBER_PRICE_ID', 'DROPIN_PRICE_ID', 'STRIPE_WEBHOOK_SECRET', 'LOGIN_SECRET', 'BILLING_PORTAL_CONFIG_ID'];
+  if (env.EMAIL_DELIVERY_MODE !== 'on_page') required.push('RESEND_API_KEY', 'MAIL_FROM');
+  check('Access delivery', true, env.EMAIL_DELIVERY_MODE === 'on_page' ? 'on confirmation page; email recovery unavailable' : 'email');
   for (const key of required) check(key, env[key], env[key] ? 'configured' : 'missing');
   let base;
   try { base = resolveSiteUrl({ ...env, NODE_ENV: 'production' }); check('Public origin', true, base); }
   catch (e) { check('Public origin', false, e.message); }
   if (env.STRIPE_SECRET_KEY) {
     const stripe = new Stripe(env.STRIPE_SECRET_KEY, { timeout: 15000, maxNetworkRetries: 1 });
-    const account = await stripe.accounts.retrieve();
-    check('Stripe account', account.id === 'acct_1TDSFELFXIBpLlZr', account.id);
-    check('Charges enabled', account.charges_enabled, String(account.charges_enabled));
-    check('Payouts enabled', account.payouts_enabled, String(account.payouts_enabled));
+    try {
+      const account = await stripe.accounts.retrieve();
+      check('Stripe account', account.id === 'acct_1TDSFELFXIBpLlZr', account.id);
+      check('Charges enabled', account.charges_enabled, String(account.charges_enabled));
+      check('Payouts enabled', account.payouts_enabled, String(account.payouts_enabled));
+    } catch (error) {
+      check('Stripe account status', false, `${error.type || 'Error'}: confirm account and charges/payouts in Dashboard`);
+    }
     const expected = expectedPrices(loadProgram());
     const live = /^(sk|rk)_live_/.test(env.STRIPE_SECRET_KEY);
     for (const [plan, id] of Object.entries({ member: env.MEMBER_PRICE_ID, dropin: env.DROPIN_PRICE_ID })) {
@@ -36,8 +42,11 @@ async function main() {
       check('Payment webhook', hook && ['checkout.session.completed', 'checkout.session.async_payment_succeeded'].every((e) => hook.enabled_events.includes(e) || hook.enabled_events.includes('*')), hook ? hook.url : 'missing or incomplete');
     }
     const portals = await stripe.billingPortal.configurations.list({ active: true, limit: 100 });
-    const portal = portals.data.find((p) => p.is_default);
-    check('Billing portal cancellation', portal?.features?.subscription_cancel?.enabled, 'default portal must allow cancellation');
+    const portal = env.BILLING_PORTAL_CONFIG_ID
+      ? await stripe.billingPortal.configurations.retrieve(env.BILLING_PORTAL_CONFIG_ID)
+      : portals.data.find((p) => p.is_default);
+    check('Billing portal cancellation', portal?.active && portal?.features?.subscription_cancel?.enabled, portal?.id || 'missing configuration');
+    check('Billing portal card updates', portal?.features?.payment_method_update?.enabled, portal?.id || 'missing configuration');
   }
 }
 main().catch((error) => { check('API access', false, `${error.type || 'Error'}: verification could not complete`); }).finally(() => {

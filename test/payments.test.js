@@ -17,10 +17,10 @@ function session(extra = {}) {
     metadata: { program: program.program, section: 'a', plan: 'dropin', date }, customer: 'cus_1',
     customer_details: { email: 'reader@example.com' }, line_items: { data: [{ price: { id: prices.dropin }, quantity: 1 }] }, ...extra };
 }
-function setup(sessions = [], subs = []) {
+function setup(sessions = [], subs = [], options = {}) {
   const stripe = fakeStripe({ program, sessions, subs, customers: [{ id: 'cus_1', email: 'reader@example.com' }] });
   stripe.webhooks = new Stripe('sk_test_fake').webhooks;
-  const ledger = createStripeLedger({ stripe, program, prices, log: quiet });
+  const ledger = createStripeLedger({ stripe, program, prices, log: quiet, ...options });
   return { stripe, ledger };
 }
 async function serve(t, opts) {
@@ -125,9 +125,41 @@ test('production never falls back to an attacker-controlled host for login links
   assert.equal(resolveSiteUrl({ NODE_ENV: 'production', RENDER_EXTERNAL_URL: 'https://reading-club-d7if.onrender.com' }), 'https://reading-club-d7if.onrender.com');
 });
 
+test('on-page delivery gives only paid customers a private access file and remembered browser', async (t) => {
+  const env = setup([session(), session({ id: 'cs_unpaid', payment_status: 'unpaid' })]);
+  const s = await serve(t, { ...env, mailAvailable: false, onPageDelivery: true });
+  const unpaid = await s.get('/welcome?id=cs_unpaid');
+  assert.equal(unpaid.headers.get('set-cookie'), null);
+  assert.equal((await s.get('/access-pass?id=cs_unpaid')).status, 404);
+  const welcome = await s.get('/welcome?id=cs_test_paid', { headers: { 'x-forwarded-proto': 'https' } });
+  const cookie = welcome.headers.get('set-cookie');
+  assert.match(cookie, /rc_member=/);
+  assert.match(cookie, /HttpOnly/);
+  assert.match(cookie, /Secure/);
+  assert.match(await welcome.text(), /Save my access link/);
+  const pass = await s.get('/access-pass?id=cs_test_paid');
+  assert.match(pass.headers.get('content-disposition'), /attachment/);
+  assert.match(await pass.text(), /https:\/\/club.example.com\/welcome\?id=cs_test_paid/);
+  const headers = { cookie: cookie.split(';')[0] };
+  assert.equal((await s.get('/login', { headers })).headers.get('location'), '/my');
+  assert.equal((await s.get('/my', { headers })).status, 200);
+  assert.match((await s.get('/logout', { method: 'POST', headers })).headers.get('set-cookie'), /rc_member=;/);
+  assert.equal(s.sent.length, 0);
+});
+
+test('explicit on-page mode acknowledges signed payment events without pretending to send email', async (t) => {
+  const env = setup([session()]);
+  const s = await serve(t, { ...env, mailAvailable: false, onPageDelivery: true });
+  const payload = JSON.stringify({ type: 'checkout.session.completed', data: { object: { id: 'cs_test_paid' } } });
+  const headers = { 'content-type': 'application/json', 'stripe-signature': env.stripe.webhooks.generateTestHeaderString({ payload, secret: 'whsec_test' }) };
+  assert.equal((await s.get('/webhooks/stripe', { method: 'POST', body: payload, headers })).status, 200);
+  assert.equal(s.sent.length, 0);
+  assert.equal((await env.ledger.receipt('cs_test_paid')).notified, false);
+});
+
 test('only an authenticated member can open their own billing portal, including past due members', async (t) => {
-  const env = setup([], [{ customer: 'cus_1', status: 'past_due', metadata: { program: program.program, plan: 'member', section: 'a' } }]);
-  env.stripe.billingPortal = { sessions: { create: async ({ customer }) => { assert.equal(customer, 'cus_1'); return { url: 'https://billing.stripe.com/p/session/test' }; } } };
+  const env = setup([], [{ customer: 'cus_1', status: 'past_due', metadata: { program: program.program, plan: 'member', section: 'a' } }], { portalConfiguration: 'bpc_reading_club' });
+  env.stripe.billingPortal = { sessions: { create: async ({ customer, configuration }) => { assert.equal(customer, 'cus_1'); assert.equal(configuration, 'bpc_reading_club'); return { url: 'https://billing.stripe.com/p/session/test' }; } } };
   const s = await serve(t, env);
   const req = (token) => s.get('/billing', { method: 'POST', body: new URLSearchParams({ t: token }) });
   assert.match((await req('forged')).headers.get('location'), /login/);

@@ -8,7 +8,7 @@ Express signup and member portal for the New York Philosophy Club. Deployed on R
 - Drop-in: $40 USD for a selected session, with the card saved by Stripe.
 - Stripe hosts payment entry. This app never receives card details.
 - `program.json` defines the course, sections, prices and public details. Private joining links belong in `PRIVATE_JSON`, `private.json`, or Render's `/etc/secrets/private.json`.
-- `ENROLLMENT_OPEN` must be exactly `true`. Missing or partial payment/email configuration keeps Stripe enrollment closed.
+- `ENROLLMENT_OPEN` must be exactly `true`. Missing or partial payment configuration keeps Stripe enrollment closed. Email is required unless the owner explicitly sets `EMAIL_DELIVERY_MODE=on_page`.
 
 Without Stripe configuration, the app stores unpaid reservations in a local persistent file or Redis. These are reservations, not paid enrollments. Before switching to Stripe, reconcile existing reservations and their capacity; they are not automatically migrated.
 
@@ -26,8 +26,8 @@ Render service: https://reading-club-d7if.onrender.com
 2. Set `SITE_URL` to the HTTPS origin. When absent, the app uses Render's trusted `RENDER_EXTERNAL_URL`; production rejects invalid URLs and never uses a visitor-supplied Host header.
 3. Set matching Stripe environment values: `STRIPE_SECRET_KEY`, `MEMBER_PRICE_ID`, and `DROPIN_PRICE_ID`. Membership must be $450 USD recurring every six weeks; drop-in must be $40 USD one-time. Every checkout revalidates the price.
 4. Create an event destination at `https://reading-club-d7if.onrender.com/webhooks/stripe`, subscribing to `checkout.session.completed` and `checkout.session.async_payment_succeeded`. Store its signing secret as `STRIPE_WEBHOOK_SECRET` on Render.
-5. Set a long random `LOGIN_SECRET`, `RESEND_API_KEY`, and `MAIL_FROM` using a verified sending domain. Sign-in is unavailable without email delivery. Tokens and email contents are never logged as a fallback.
-6. Enable Stripe's default customer portal with payment-method updates and cancellation at the end of the billing period. The app creates an authenticated portal session for the member's Stripe Customer.
+5. Set a long random `LOGIN_SECRET`. Normally set `RESEND_API_KEY` and `MAIL_FROM` using a verified sending domain. To launch without email, explicitly set `EMAIL_DELIVERY_MODE=on_page`: verified payment opens the member page, sets an HttpOnly secure browser cookie, and offers a downloadable private access file. Members must keep that file; email recovery is unavailable. A valid member link remembers the browser for another 60 days. Payment confirmation can renew access while enrollment remains active. Lost-link recovery requires organizer identity/payment verification. Tokens and email contents are never logged as a fallback.
+6. Create a Stripe customer portal configuration with payment-method updates and cancellation at the end of the billing period. Set `BILLING_PORTAL_CONFIG_ID` to use that configuration without changing other businesses on the account. Without this setting the app uses Stripe's default configuration. The app creates an authenticated portal session for the member's Stripe Customer.
 7. Fill in `contactEmail` and the approved `refundPolicy` in `program.json`, and the private joining links. Configure the journal promotion only once its amount and duration are confirmed. `SOURCE_PROMOS=journal=promo_...` applies a source discount automatically; typed/shared codes override it.
 8. Run `npm run verify:payments` in the configured environment. This is read-only: it checks account identity, charge/payout capability, matching prices, webhook registration and cancellation configuration without printing credentials or creating charges.
 9. Exercise the full flow with Stripe test credentials and test prices first: successful payment, decline, authentication, invalid code, full discount, cancel/return, webhook retry, member email, calendar and billing cancellation. Test email delivery using an address controlled by the organizer.
@@ -40,13 +40,13 @@ Live catalog entries created October 3, 2026 in account `acct_1TDSFELFXIBpLlZr`:
 | Membership | `prod_VNF5oRCW7gXv9f` | `price_1UMUbDLFXIBpLlZr6NotQtj6` |
 | Drop-in | `prod_VNFES34KNTiSy6` | `price_1UMUkALFXIBpLlZrSLMHq2aK` |
 
-Creating these products does not connect Render or demonstrate successful checkout.
+The live products, restricted server key, webhook, and dedicated portal `bpc_1UMVAqLFXIBpLlZrWmlZROPV` were connected to Render on October 3. Both live checkout types were created with the correct totals and expired without payment. This does not demonstrate a successfully settled charge.
 
 ## Payment confirmation and capacity
 
 Completed checkout is not sufficient for member access. Confirmation checks the actual price, quantity, currency, payment mode, program and payment status. Unpaid checkouts show processing without member links or calendar access. Refunded or disputed drop-ins are denied access. Active/trialing subscriptions grant access; past-due/unpaid subscriptions can still reach billing to resolve payment, but not private class links.
 
-Signed Stripe webhooks deliver confirmation emails even if a customer closes the browser after paying. Delivery uses a stable Resend idempotency key and a durable sent marker on the Checkout Session. Failed deliveries return a retryable error to Stripe. Resend's idempotency window is finite; a prolonged failure between delivery and marking the session needs manual reconciliation.
+With email configured, signed Stripe webhooks deliver confirmation emails even if a customer closes the browser after paying. Delivery uses a stable Resend idempotency key and a durable sent marker on the Checkout Session. Failed deliveries return a retryable error to Stripe. Resend's idempotency window is finite; a prolonged failure between delivery and marking the session needs manual reconciliation. In explicit on-page mode without mail, webhooks validate the payment and acknowledge it; Stripe is the enrollment record and the verified success page delivers access. Customers who close checkout before returning need their saved access file or organizer assistance. No email-sent marker is recorded when no email was sent.
 
 Checkout requests are serialized within one process, and open Stripe Checkout Sessions reserve seats for 31 minutes. Repeated submissions of the same form reuse the same Stripe idempotency key and request while the process is alive. Capacity is still an operational limit, not a distributed transaction: overlapping instances, deploys, API list visibility and another selling application can oversell. Do not horizontally scale without a transactional shared reservation store. Completed canceled/refunded purchases can conservatively hold capacity until manually reconciled. Run one instance and close enrollment during migration/deployment near capacity.
 

@@ -25,6 +25,7 @@ function pickLedger() {
     return createStripeLedger({
       stripe, program,
       prices: { member: env.MEMBER_PRICE_ID, dropin: env.DROPIN_PRICE_ID },
+      portalConfiguration: env.BILLING_PORTAL_CONFIG_ID,
       sourcePromos: parseSourcePromos(env.SOURCE_PROMOS),
     });
   }
@@ -44,7 +45,8 @@ const ledger = pickLedger();
 // Never take real signups somewhere they'd be lost.
 const durable = ledger.mode === 'stripe' || ledger.storage === 'redis' || !onVercel;
 const mailAvailable = Boolean(env.RESEND_API_KEY && env.MAIL_FROM);
-const paymentReady = ledger.mode !== 'stripe' || Boolean(env.STRIPE_WEBHOOK_SECRET && env.LOGIN_SECRET && mailAvailable);
+const onPageDelivery = env.EMAIL_DELIVERY_MODE === 'on_page';
+const paymentReady = ledger.mode !== 'stripe' || Boolean(env.STRIPE_WEBHOOK_SECRET && env.LOGIN_SECRET && (mailAvailable || onPageDelivery));
 const enrollmentOpen = durable && !partialStripe && paymentReady && env.ENROLLMENT_OPEN === 'true';
 if (!env.LOGIN_SECRET) console.warn('[config] LOGIN_SECRET is not set. Member sign-in is off.');
 
@@ -55,7 +57,7 @@ const app = createApp({
   portalUrl: env.BILLING_PORTAL_URL,
   loginSecret: env.LOGIN_SECRET,
   notifyEmail: env.NOTIFY_EMAIL,
-  stripe, webhookSecret: env.STRIPE_WEBHOOK_SECRET, mailAvailable,
+  stripe, webhookSecret: env.STRIPE_WEBHOOK_SECRET, mailAvailable, onPageDelivery,
   enrollmentOpen,
   mailer: resendMailer({ apiKey: env.RESEND_API_KEY, from: env.MAIL_FROM }),
 });
