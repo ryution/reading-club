@@ -18,7 +18,7 @@ services:
       - key: DATA_DIR
         value: /var/data
       - key: ENROLLMENT_OPEN
-        value: 'false'
+        sync: false
       - key: SITE_URL
         sync: false
       - key: LOGIN_SECRET
