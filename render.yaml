@@ -31,6 +31,8 @@ services:
         sync: false
       - key: STRIPE_SECRET_KEY
         sync: false
+      - key: STRIPE_WEBHOOK_SECRET
+        sync: false
       - key: MEMBER_PRICE_ID
         sync: false
       - key: DROPIN_PRICE_ID

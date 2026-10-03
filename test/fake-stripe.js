@@ -27,6 +27,7 @@ function fakeStripe({ program, subs = [], sessions = [], prices, createError, cu
           return { id: 'cs_test_new', url: 'https://checkout.stripe.com/c/pay/cs_test_new' };
         },
         retrieve: async (id) => { if (!byId[id]) throw new Error('No such session'); return byId[id]; },
+        update: async (id, { metadata }) => { Object.assign(byId[id].metadata, metadata); return byId[id]; },
       },
     },
   };

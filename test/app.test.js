@@ -124,12 +124,12 @@ describe('pages', () => {
     s.close();
   });
 
-  test('drop-in page hides full dates and keeps the page short', async () => {
+  test('drop-in page hides full dates and includes later available sessions', async () => {
     const s = await serve({ ledger: seeded(Array.from({ length: 20 }, () => ({ plan: 'dropin', section: 'a', date: '2026-10-19' }))) });
     const h = await s.html('/join?plan=dropin');
     assert.ok(!h.includes('value="a|2026-10-19"'));
     assert.ok(h.includes('value="a|2026-10-21"'));
-    assert.ok((h.match(/name="slot"/g) || []).length <= 12);
+    assert.ok(h.includes('a|2026-11-23'));
     s.close();
   });
 
@@ -226,7 +226,7 @@ describe('codes and sources', () => {
     const s = await serve();
     const res = await s.get('/?code=spring&src=journal');
     const cookies = res.headers.getSetCookie().map((c) => c.split(';')[0]).join('; ');
-    assert.ok((await res.text()).includes('Code <strong>SPRING</strong> will be applied'));
+    assert.ok((await res.text()).includes('Code <strong>SPRING</strong> is ready to check'));
     assert.ok((await s.html('/join', { headers: { cookie: cookies } })).includes('value="SPRING"'));
     s.close();
   });
@@ -340,7 +340,7 @@ describe('hosting', () => {
         const join = await (await fetch(base + '/join')).text();
         console.log(JSON.stringify({ home: home.status, closed: join.includes('Signups open soon'), health: (await fetch(base + '/healthz')).status }));
         s.close();
-      });`], { cwd: path.join(__dirname, '..'), env: { ...process.env, VERCEL: '1', NODE_ENV: 'production', SITE_URL: '', STRIPE_SECRET_KEY: '', KV_REST_API_URL: '', DATA_DIR: '' }, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] });
+      });`], { cwd: path.join(__dirname, '..'), env: { ...process.env, VERCEL: '1', NODE_ENV: 'production', SITE_URL: 'https://club.example.com', STRIPE_SECRET_KEY: '', KV_REST_API_URL: '', DATA_DIR: '' }, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] });
     assert.deepStrictEqual(JSON.parse(out.trim().split('\n').pop()), { home: 200, closed: true, health: 200 });
   });
 });

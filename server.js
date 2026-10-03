@@ -14,13 +14,16 @@ loadLocalEnv();
 const env = process.env;
 const program = loadProgram();
 const onVercel = Boolean(env.VERCEL);
+const paymentKeys = ['STRIPE_SECRET_KEY', 'MEMBER_PRICE_ID', 'DROPIN_PRICE_ID'];
+const partialStripe = paymentKeys.some((key) => env[key]) && !paymentKeys.every((key) => env[key]);
+const stripe = env.STRIPE_SECRET_KEY ? new (require('stripe'))(env.STRIPE_SECRET_KEY, { maxNetworkRetries: 2, timeout: 15000 }) : null;
+if (partialStripe) console.error('[payments] Incomplete Stripe configuration. Enrollment is closed.');
 
 function pickLedger() {
   if (env.STRIPE_SECRET_KEY && env.MEMBER_PRICE_ID && env.DROPIN_PRICE_ID) {
-    const Stripe = require('stripe');
     console.log('[payments] Stripe checkout is on.');
     return createStripeLedger({
-      stripe: new Stripe(env.STRIPE_SECRET_KEY), program,
+      stripe, program,
       prices: { member: env.MEMBER_PRICE_ID, dropin: env.DROPIN_PRICE_ID },
       sourcePromos: parseSourcePromos(env.SOURCE_PROMOS),
     });
@@ -32,7 +35,7 @@ function pickLedger() {
     return createLocalLedger({ program, store: createRedisStore({ url: redisUrl, token: redisToken }) });
   }
   // Vercel's disk is read-only apart from /tmp, and /tmp is wiped often.
-  const dataDir = env.DATA_DIR || (onVercel ? '/tmp/reading-club' : path.join(__dirname, 'data'));
+  const dataDir = env.DATA_DIR || (onVercel ? path.join(require('os').tmpdir(), 'reading-club') : path.join(__dirname, 'data'));
   if (onVercel) console.warn('[storage] No Redis connected. Reservations go to /tmp and WILL be lost. Signups stay closed until Redis is added.');
   return createLocalLedger({ program, store: createFileStore(dataDir) });
 }
@@ -40,7 +43,9 @@ function pickLedger() {
 const ledger = pickLedger();
 // Never take real signups somewhere they'd be lost.
 const durable = ledger.mode === 'stripe' || ledger.storage === 'redis' || !onVercel;
-const enrollmentOpen = durable && env.ENROLLMENT_OPEN !== 'false';
+const mailAvailable = Boolean(env.RESEND_API_KEY && env.MAIL_FROM);
+const paymentReady = ledger.mode !== 'stripe' || Boolean(env.STRIPE_WEBHOOK_SECRET && env.LOGIN_SECRET && mailAvailable);
+const enrollmentOpen = durable && !partialStripe && paymentReady && env.ENROLLMENT_OPEN === 'true';
 if (!env.LOGIN_SECRET) console.warn('[config] LOGIN_SECRET is not set. Member sign-in is off.');
 
 const app = createApp({
@@ -50,8 +55,9 @@ const app = createApp({
   portalUrl: env.BILLING_PORTAL_URL,
   loginSecret: env.LOGIN_SECRET,
   notifyEmail: env.NOTIFY_EMAIL,
+  stripe, webhookSecret: env.STRIPE_WEBHOOK_SECRET, mailAvailable,
   enrollmentOpen,
-  mailer: resendMailer({ apiKey: env.RESEND_API_KEY, from: env.MAIL_FROM || 'Reading Club <onboarding@resend.dev>' }),
+  mailer: resendMailer({ apiKey: env.RESEND_API_KEY, from: env.MAIL_FROM }),
 });
 
 if (require.main === module) {

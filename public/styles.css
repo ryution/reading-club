@@ -127,6 +127,21 @@ h3, .h3 { font-size: 1.25rem; line-height: 1.3; }
 .code-banner { display: inline-flex; align-items: center; gap: 0.5rem; padding: 0.5rem 0.9rem; margin-bottom: 1.5rem; border-radius: var(--radius); background: rgba(255, 253, 242, .14); border: 1px solid rgba(255, 253, 242, .35); font-size: 0.95rem; }
 @media (max-width: 30em) { .hero-ctas .btn { width: 100%; } }
 
+/* A reading-room opening: the photograph stays visible beside the title. */
+.hero h1 { font-family: var(--reading); font-size: clamp(3rem, 7.6vw, 6.5rem); line-height: .98; font-weight: 400; letter-spacing: -.035em; max-width: 12ch; text-wrap: balance; }
+.hero-inner { padding-top: clamp(4rem, 8vw, 7rem); padding-bottom: clamp(3rem, 5vw, 4.5rem); }
+.hero-lead { max-width: 32ch; font-size: clamp(1.35rem, 2.4vw, 1.8rem); }
+.hero-details { position: relative; display: flex; flex-wrap: wrap; gap: 1.25rem 2.5rem; padding-top: 1.4rem; padding-bottom: 1.4rem; border-top: 1px solid #ffffff40; color: #f4f0e3; font-size: .85rem; }
+.hero-details span { display: inline-flex; align-items: center; gap: .6rem; }
+.hero-details .i { color: #dbc79c; }
+.hero-shade { background: linear-gradient(90deg, #101e2deb 0%, #101e2da6 48%, #101e2d30 100%), linear-gradient(0deg, #101e2dcc, transparent 55%); }
+@media (max-width: 40em) {
+  .hero h1 { font-size: clamp(2.7rem, 12vw, 4.2rem); }
+  .hero-details { gap: .8rem; flex-direction: column; }
+  .hero-img { object-position: 63% center; }
+  .hero-shade { background: linear-gradient(90deg, #101e2de6, #101e2d75), linear-gradient(0deg, #101e2de6, transparent); }
+}
+
 /* ---------- sections ---------- */
 .section { padding: clamp(3.5rem, 8vw, 6rem) 0; }
 .section.tight { padding-top: 2rem; }

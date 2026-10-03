@@ -1,99 +1,63 @@
 # Reading Club: The Good Life
 
-The signup site for the New York Philosophy Club's paid Reading Club. Visitors read about the program, pick a membership section or a single drop-in session, sign up, and get a schedule, a calendar file and a member page with their joining details.
+Express signup and member portal for the New York Philosophy Club. Deployed on Render from `ryution/reading-club`, branch `main`.
 
-It matches nyphilosophy.org: same cream paper, navy ink, terracotta accent, Libre Baskerville and Newsreader type, rounded outline buttons, logo and footer.
+## Offer and payment behavior
 
-## Payments: placeholder for now
+- Membership: $450 USD at checkout, recurring every six weeks from purchase.
+- Drop-in: $40 USD for a selected session, with the card saved by Stripe.
+- Stripe hosts payment entry. This app never receives card details.
+- `program.json` defines the course, sections, prices and public details. Private joining links belong in `PRIVATE_JSON`, `private.json`, or Render's `/etc/secrets/private.json`.
+- `ENROLLMENT_OPEN` must be exactly `true`. Missing or partial payment/email configuration keeps Stripe enrollment closed.
 
-Stripe is built but switched off. Until the Stripe keys are set, signing up **reserves a seat** instead of charging a card:
+Without Stripe configuration, the app stores unpaid reservations in a local persistent file or Redis. These are reservations, not paid enrollments. Before switching to Stripe, reconcile existing reservations and their capacity; they are not automatically migrated.
 
-- The student enters name and email, and the seat counts toward the section's cap right away.
-- They get a confirmation email with their schedule and member page link. The page says clearly that no payment is due today and a payment link will follow before the term.
-- Organizers get a note for every signup (`NOTIFY_EMAIL`), and `npm run --silent roster > roster.csv` exports every reservation with its list source and code.
+## Local development
 
-When Stripe is ready, set `STRIPE_SECRET_KEY`, `MEMBER_PRICE_ID` and `DROPIN_PRICE_ID` and restart. The same pages switch to Stripe Checkout:
+Use Node 22.16 or later. Run `npm ci`, then `npm run demo` for a sample-data preview. `npm start` loads an ignored `.env` file if present. Do not put live credentials in source control.
 
-- Membership is a subscription, $450 every 6 weeks ($25 per class hour).
-- Drop-in is $40 once, and the card is saved for next time.
-- Seats are then counted from Stripe, and codes are checked against Stripe promotion codes.
+Run `npm test`. Tests cover enrollment, calendar, waitlists, promo codes, private access, concurrency, billing authorization, price checks and signed webhook retries. The optional stripe-mock contract test skips when its server is absent. Mocked tests do not prove a real payment succeeded.
 
-Reservations made before the switch stay in `DATA_DIR`. Send those people payment links from Stripe.
+## Render and Stripe setup
 
-## Pages
+Render service: https://reading-club-d7if.onrender.com
 
-| Path | What it is |
-| --- | --- |
-| `/` | The offer: the reading, how a week works, who teaches, sections with seats left and an Enroll button each, tuition, questions, and a "keep me posted" form |
-| `/join?plan=member&section=b` | Pick a section, then add your details and an optional code. Full sections show a waitlist |
-| `/join?plan=dropin` | Pick one session. Only open dates are shown, four per section |
-| `/welcome?id=...` | Confirmation, what happens next, schedule, add-to-calendar, member page link |
-| `/login` | Member sign in: enter email, get a link. No passwords |
-| `/my?t=...` | Member page: section, Zoom link, lecture location, readings, upcoming dates, calendar |
-| `/healthz` | Health check for the host |
+1. Keep `ENROLLMENT_OPEN=false` while configuring. Use one Render instance with the persistent disk in `render.yaml`.
+2. Set `SITE_URL` to the HTTPS origin. When absent, the app uses Render's trusted `RENDER_EXTERNAL_URL`; production rejects invalid URLs and never uses a visitor-supplied Host header.
+3. Set matching Stripe environment values: `STRIPE_SECRET_KEY`, `MEMBER_PRICE_ID`, and `DROPIN_PRICE_ID`. Membership must be $450 USD recurring every six weeks; drop-in must be $40 USD one-time. Every checkout revalidates the price.
+4. Create an event destination at `https://reading-club-d7if.onrender.com/webhooks/stripe`, subscribing to `checkout.session.completed` and `checkout.session.async_payment_succeeded`. Store its signing secret as `STRIPE_WEBHOOK_SECRET` on Render.
+5. Set a long random `LOGIN_SECRET`, `RESEND_API_KEY`, and `MAIL_FROM` using a verified sending domain. Sign-in is unavailable without email delivery. Tokens and email contents are never logged as a fallback.
+6. Enable Stripe's default customer portal with payment-method updates and cancellation at the end of the billing period. The app creates an authenticated portal session for the member's Stripe Customer.
+7. Fill in `contactEmail` and the approved `refundPolicy` in `program.json`, and the private joining links. Configure the journal promotion only once its amount and duration are confirmed. `SOURCE_PROMOS=journal=promo_...` applies a source discount automatically; typed/shared codes override it.
+8. Run `npm run verify:payments` in the configured environment. This is read-only: it checks account identity, charge/payout capability, matching prices, webhook registration and cancellation configuration without printing credentials or creating charges.
+9. Exercise the full flow with Stripe test credentials and test prices first: successful payment, decline, authentication, invalid code, full discount, cancel/return, webhook retry, member email, calendar and billing cancellation. Test email delivery using an address controlled by the organizer.
+10. Switch to matching live credentials/prices after those checks. The account owner should complete the authorized real-payment check. Open enrollment only when the whole flow and program details are ready.
 
-The site sends no JavaScript to the browser. Every step is a plain link or form, so it works on any phone, with scripts blocked, and with screen readers.
+Live catalog entries created October 3, 2026 in account `acct_1TDSFELFXIBpLlZr`:
 
-## Tracking lists and codes
+| Plan | Product | Price |
+| --- | --- | --- |
+| Membership | `prod_VNF5oRCW7gXv9f` | `price_1UMUbDLFXIBpLlZr6NotQtj6` |
+| Drop-in | `prod_VNFES34KNTiSy6` | `price_1UMUkALFXIBpLlZrSLMHq2aK` |
 
-- **Sources:** add `?src=` to every link you send out, like `?src=journal`, `?src=222` or `?src=luma`. The first source a visitor arrives with is kept for 30 days and saved on their signup.
-- **Codes:** share a code as a link (`/?code=JOURNAL`) and it is remembered and filled in. People can also type one under "Have a code?".
-  - While Stripe is off, codes are recorded on the reservation so you can honor them on the payment link.
-  - Once Stripe is on, codes are checked live, and a bad code sends people back with a note.
-  - With Stripe on, `SOURCE_PROMOS=journal=promo_...` applies a code automatically to everyone from `?src=journal`.
+Creating these products does not connect Render or demonstrate successful checkout.
 
-## What to edit
+## Payment confirmation and capacity
 
-- **`program.json`:** term start, weeks, prices, the six texts, lecture day and time, sections (days, time, capacity, facilitator), the teacher bio, contact email and refund policy.
-  - Weekdays are numbered 0 = Sunday through 6 = Saturday, and times are 24-hour Eastern.
-  - The refund policy shows up in the Questions list only once it is filled in.
-  - **The section times are placeholders. Confirm them with Cole before opening signups.**
-- **Teacher photo:** put it in `public/img/`, then set `teacher.photo` to `/img/cole.jpg`.
-- **`private.json`** (copy from `private.example.json`): Zoom links per section, the lecture address or stream, and a readings link. These are only ever shown to signed-in members. Anything left empty shows "Coming by email."
+Completed checkout is not sufficient for member access. Confirmation checks the actual price, quantity, currency, payment mode, program and payment status. Unpaid checkouts show processing without member links or calendar access. Refunded or disputed drop-ins are denied access. Active/trialing subscriptions grant access; past-due/unpaid subscriptions can still reach billing to resolve payment, but not private class links.
 
-## Run it
+Signed Stripe webhooks deliver confirmation emails even if a customer closes the browser after paying. Delivery uses a stable Resend idempotency key and a durable sent marker on the Checkout Session. Failed deliveries return a retryable error to Stripe. Resend's idempotency window is finite; a prolonged failure between delivery and marking the session needs manual reconciliation.
 
-```powershell
-npm ci
-npm run demo      # full click-through with sample signups, nothing saved
-npm start         # the real thing; copy .env.example to .env first
-npm test
-```
+Checkout requests are serialized within one process, and open Stripe Checkout Sessions reserve seats for 31 minutes. Repeated submissions of the same form reuse the same Stripe idempotency key and request while the process is alive. Capacity is still an operational limit, not a distributed transaction: overlapping instances, deploys, API list visibility and another selling application can oversell. Do not horizontally scale without a transactional shared reservation store. Completed canceled/refunded purchases can conservatively hold capacity until manually reconciled. Run one instance and close enrollment during migration/deployment near capacity.
 
-`npm test` includes Stripe contract tests that run against [stripe-mock](https://github.com/stripe/stripe-mock) on port 12111. They are skipped if it isn't running.
+Membership billing repeats from purchase; the displayed class schedule covers the configured six-week course only. Publish the next course's schedule and reconcile subscription seats before a term rollover. Refunding a subscription payment does not cancel the subscription; use Stripe cancellation when revoking membership.
 
-## Deploy on Vercel (current)
+## Sources, codes and operations
 
-The site is live at reading-club-rho.vercel.app. Vercel runs `server.js` as a function and serves `public/` directly.
+`?src=journal`, `?src=222`, etc. persist first-touch attribution for 30 days. `?code=JOURNAL` prefills a code for validation at checkout. Clearing the field clears the linked code. Invalid codes are not silently charged at full price.
 
-Vercel can't keep files between requests, so reservations need a database. Until one is connected, the site loads but signups stay closed ("Signups open soon").
+`npm run --silent roster > roster.csv` exports the selected ledger. The CSV is private and ignored by Git. Reconcile payment and refund state in Stripe before using the roster. Waitlist notifications, course materials, reminder emails and term rollover remain organizer operations.
 
-1. In the Vercel project, open **Storage**, choose **Upstash for Redis** (free tier is plenty), and connect it to this project. That adds `KV_REST_API_URL` and `KV_REST_API_TOKEN` for you.
-2. Under **Settings → Environment Variables**, add:
-   - `LOGIN_SECRET`: any long random string
-   - `RESEND_API_KEY` and `MAIL_FROM`, for confirmation and sign-in emails
-   - `NOTIFY_EMAIL`, optional: gets a note for every signup
-   - `PRIVATE_JSON`: the contents of `private.json` (Zoom links and so on), pasted as one line
-   - `ENROLLMENT_OPEN=false` until Cole confirms the section times, then remove it or set it to `true`
-3. Redeploy.
+`/healthz` checks the process only. Use the payment audit and a real Stripe test-mode signup to assess checkout readiness.
 
-Set `SITE_URL` once there's a custom domain. Until then, emailed links use the Vercel production address.
-
-## Deploy on Render (alternative)
-
-`render.yaml` sets up one web service with a 1 GB disk at `/var/data`, which keeps reservations as a file. Create a Blueprint from this repository, set `SITE_URL`, the Resend variables and `ENROLLMENT_OPEN`, and run exactly one instance.
-
-## Files
-
-- `server.js`: reads settings and starts the site (or hands it to Vercel)
-- `lib/app.js`: routes
-- `config.js`: env loading and checks
-- `lib/pages.js`: every page
-- `public/styles.css`: the design
-- `lib/ledger-local.js`: seat reservations while Stripe is off, stored in Redis or a file
-- `lib/ledger-stripe.js`: Stripe Checkout, subscriptions and seat counts
-- `lib/login.js`: sign-in links and email
-- `lib/schedule.js` and `lib/calendar.js`: dates and .ics files
-- `scripts/roster.js`: CSV export
-- `scripts/demo.js`: sample-data demo
-- `WELCOME-EMAIL.md`: the longer welcome email to send before week one
+References: [Stripe fulfillment](https://docs.stripe.com/checkout/fulfillment), [Stripe Checkout](https://docs.stripe.com/api/checkout/sessions/create), [Render environment variables](https://render.com/docs/environment-variables).

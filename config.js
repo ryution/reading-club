@@ -33,13 +33,12 @@ function parseSourcePromos(v) {
 }
 
 // The public address used in emailed links. SITE_URL wins; on Vercel the
-// production domain is used when SITE_URL isn't set. Bad values are ignored
-// (links then use the request's own address) rather than taking the site down.
+// production domain is used when SITE_URL isn't set. Production never trusts
+// a visitor's Host header for payment redirects or emailed sign-in links.
 function resolveSiteUrl(env = process.env, log = console) {
   const production = env.NODE_ENV === 'production';
-  const candidate = env.SITE_URL || (env.VERCEL_PROJECT_PRODUCTION_URL ? `https://${env.VERCEL_PROJECT_PRODUCTION_URL}` : '');
-  if (!candidate) return undefined;
-  try { return validateConfig({ siteUrl: candidate, production }); } catch (err) { log.warn(`[config] ${err.message} Ignoring SITE_URL.`); return undefined; }
+  const candidate = env.SITE_URL || env.RENDER_EXTERNAL_URL || (env.VERCEL_PROJECT_PRODUCTION_URL ? `https://${env.VERCEL_PROJECT_PRODUCTION_URL}` : '');
+  return validateConfig({ siteUrl: candidate, production });
 }
 
 module.exports = { loadLocalEnv, validateConfig, resolveSiteUrl, parseSourcePromos };
